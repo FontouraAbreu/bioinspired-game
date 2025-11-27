@@ -9,7 +9,7 @@ jobs:
     - uses: actions/setup-python@v2
     - uses: astral-sh/ruff-action@v3
       with:
-        args: --check . --fix .
+        args: check --fix
     - uses: stefanzweifel/git-auto-commit-action@v4
       with:
         commit_message: '[style] automated fixes by ruff github action'
