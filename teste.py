@@ -2,11 +2,9 @@
 """
 POC 2D de Plataforma Simples com Tiled Map e Inimigos Evolutivos.
 
-NOVIDADE: Introdução de estados de jogo ('PLAYING', 'EVOLUTION_SUMMARY') para pausar
-e exibir a tela de resumo da evolução ao final de cada geração (Tecla '0').
-
-MELHORIA: Layout da tela de resumo da evolução foi reestruturado para melhor
-visualização e espaçamento.
+ALGORITMO DE EVOLUÇÃO ATUALIZADO (SELEÇÃO ELITISTA COM SALTO GENÉTICO):
+A lógica de Salto Genético (Shock Mutation) é adicionada para evitar estagnação
+quando todos os inimigos têm fitness baixo e parecido.
 """
 import arcade
 import random
@@ -32,9 +30,25 @@ ENEMY_ACCELERATION = 0.25
 ENEMY_FRICTION = 0.95
 ENEMY_DRIFT_DECELERATION = 0.6
 
-MAX_TRAIT_VALUE = 5
-MIN_TRAIT_VALUE = 1
-TRAIT_MUTATION_RATE = 0.5  # A magnitude da mutação
+MAX_TRAIT_VALUE = 5.0  # O valor máximo que um traço pode atingir
+MIN_TRAIT_VALUE = 1.0  # O valor mínimo que um traço pode ter
+
+# Taxas de Mutação
+TRAIT_MUTATION_RATE = 0.5  # A magnitude da mutação para filhos
+ELITE_MUTATION_RATE = 0.1  # Mutação leve aplicada ao indivíduo Elite
+
+# --- CONSTANTES DE SALTO GENÉTICO (SHOCK MUTATION) ---
+STAGNATION_MIN_AVG_FITNESS = (
+    150.0  # Fitness médio abaixo deste valor é considerado 'baixo'
+)
+STAGNATION_FITNESS_DIFFERENCE = (
+    50.0  # Diferença máxima entre o melhor e o pior para ser 'parecido'
+)
+SHOCK_MUTATION_RATE = 3.0  # Magnitude forte da mutação de choque
+
+# --- CONSTANTES DE HABILIDADE ---
+FLY_THRESHOLD = 3.0  # Nível mínimo do traço 'fly' para o inimigo começar a voar.
+JUMP_THRESHOLD = 1.0  # Nível mínimo do traço 'jump' para o inimigo tentar pular.
 
 # --- CONSTANTES DE FITNESS ---
 PROXIMITY_SCORING_CONSTANT = 100.0
@@ -50,9 +64,11 @@ W_PROXIMITY = 1.0  # Peso para a Pontuação de Proximidade (A)
 # Limite de distância para considerar um "Hit"
 HIT_SCORE_THRESHOLD = 20
 
-# Constantes de Voo (Não Alteradas)
+# Constantes de Voo
 BAT_FLAP_LIFT = 8.0
-BAT_GRAVITY_EFFECT = -0.3
+BAT_GRAVITY_EFFECT = (
+    -0.3
+)  # Gravidade aplicada no modo voo (deve ser menor que a do mundo)
 HORIZONTAL_WOBBLE = 0.5
 BAT_FLAP_BASE_INTERVAL = 0.5
 BAT_FLAP_MIN_INTERVAL = 0.2
@@ -72,7 +88,7 @@ BACKGROUND_COLOR = (173, 216, 230)
 class Enemy(arcade.Sprite):
     """
     Classe base para os inimigos com traços evolutivos.
-    Inclui rastreamento de fitness.
+    O comportamento (voar/andar) é definido pelo valor do traço 'fly'.
     """
 
     def __init__(self, traits: dict, image_path: str, scale: float = 0.4):
@@ -85,7 +101,7 @@ class Enemy(arcade.Sprite):
             self.width = radius * 2
             self.height = radius * 2
 
-            # Ajusta a cor com base no traço 'run' para visualização
+            # Ajusta a cor com base no traço 'run' para visualização (mantido por estética)
             run_norm = traits.get("run", 1) / MAX_TRAIT_VALUE
             color_intensity = int(255 * (1 - run_norm * 0.5))
             self.color = (255, color_intensity, color_intensity)
@@ -95,11 +111,10 @@ class Enemy(arcade.Sprite):
 
         self.traits = traits
 
-        # Aplica traços
-        self.max_run_speed = (
-            self.traits.get("run", 1) / MAX_TRAIT_VALUE
+        # A velocidade base (afeta tanto o modo voo quanto o solo)
+        self.max_base_speed = (
+            self.traits.get("run", 1.0) / MAX_TRAIT_VALUE
         ) * ENEMY_MAX_RUN_SPEED
-        self.max_fly_speed = self.traits.get("fly", 1) * TRAIT_MULTIPLIER
         self.flap_timer = random.uniform(0, BAT_FLAP_BASE_INTERVAL)
 
         self.physics_engine = None
@@ -112,6 +127,7 @@ class Enemy(arcade.Sprite):
         self.hits = 0
         self.proximity_score = 0.0
         self.current_fitness = 0.0
+        self.is_shocked = False  # Novo flag para indicar mutação de choque
 
     def calculate_final_fitness(self):
         """Calcula a pontuação de fitness final e armazena."""
@@ -124,74 +140,65 @@ class Enemy(arcade.Sprite):
         self.player_target = player_sprite
 
     def set_physics_engine(self, engine):
+        """Define ou remove o motor de física. Usado por inimigos terrestres."""
         self.physics_engine = engine
 
     def update_movement(self, delta_time):
-        """Lógica de movimento do inimigo. Detalhes omitidos por serem os mesmos da versão anterior."""
+        """
+        Lógica de movimento do inimigo.
+        O comportamento Voar/Solo é determinado pelo nível do traço 'fly'.
+        """
         if not self.player_target:
             return
 
         if self.jump_cooldown > 0:
             self.jump_cooldown -= delta_time
 
-        # 1. Movimento Terrestre (run/jump)
-        if self.traits.get("run", 0) > 0 and self.traits.get("type") != "flying":
-            distance_to_player = self.player_target.center_x - self.center_x
+        # Verifica se o inimigo tem a capacidade de voar
+        is_flying = self.traits.get("fly", 0) >= FLY_THRESHOLD
 
-            if abs(distance_to_player) > ENEMY_PERCEPTION_RANGE:
-                self.change_x *= ENEMY_FRICTION
-                self.is_drifting = False
-                return
+        # 1. Lógica Horizontal (Aplica-se a ambos)
+        distance_to_player = self.player_target.center_x - self.center_x
 
-            desired_direction = 0
-            if distance_to_player < 0:
-                desired_direction = -1
-            elif distance_to_player > 0:
-                desired_direction = 1
+        # Força o atrito se estiver fora do alcance de percepção
+        if abs(distance_to_player) > ENEMY_PERCEPTION_RANGE:
+            self.change_x *= ENEMY_FRICTION
+            self.is_drifting = False
+            return
 
-            if desired_direction != 0:
-                if (desired_direction * self.change_x < 0) and (
-                    abs(self.change_x) > 0.5
-                ):
-                    self.is_drifting = True
-                else:
-                    self.is_drifting = False
+        # Calcula a direção horizontal desejada
+        desired_direction = 0
+        if distance_to_player < 0:
+            desired_direction = -1
+        elif distance_to_player > 0:
+            desired_direction = 1
 
-            if self.is_drifting:
-                self.change_x *= ENEMY_DRIFT_DECELERATION
-                if abs(self.change_x) < 0.2:
-                    self.is_drifting = False
-                    self.change_x = 0
-            elif desired_direction != 0:
-                self.change_x += ENEMY_ACCELERATION * desired_direction
+        # Lógica de aceleração e atrito
+        if desired_direction != 0:
+            if (desired_direction * self.change_x < 0) and (abs(self.change_x) > 0.5):
+                self.is_drifting = True
             else:
-                self.change_x *= ENEMY_FRICTION
+                self.is_drifting = False
 
-            self.change_x = max(
-                min(self.change_x, self.max_run_speed), -self.max_run_speed
-            )
+        if self.is_drifting:
+            self.change_x *= ENEMY_DRIFT_DECELERATION
+            if abs(self.change_x) < 0.2:
+                self.is_drifting = False
+                self.change_x = 0
+        elif desired_direction != 0:
+            self.change_x += ENEMY_ACCELERATION * desired_direction
+        else:
+            self.change_x *= ENEMY_FRICTION
 
-            if self.traits.get("type") == "running":
-                jump_trait = self.traits.get("jump", 0)
-                if jump_trait > 0 and self.physics_engine and self.jump_cooldown <= 0:
-                    player_higher = (
-                        self.player_target.center_y > self.center_y + self.height * 0.5
-                    )
-                    player_close_x = (
-                        abs(self.player_target.center_x - self.center_x) < 150
-                    )
-                    random_jump_chance = random.randint(1, 100) == 1
+        # Limita a velocidade horizontal baseada no traço 'run'
+        self.change_x = max(
+            min(self.change_x, self.max_base_speed), -self.max_base_speed
+        )
 
-                    if (
-                        (player_higher and player_close_x) or random_jump_chance
-                    ) and self.physics_engine.can_jump():
-                        jump_force = jump_trait / MAX_TRAIT_VALUE * PLAYER_JUMP_FORCE
-                        self.change_y = jump_force
-                        self.jump_cooldown = self.JUMP_COOLDOWN_TIME
-
-        # 2. Movimento Vertical (fly)
-        if self.traits.get("fly", 0) > 0 and self.traits.get("type") == "flying":
-            self.change_y += BAT_GRAVITY_EFFECT
+        # 2. Lógica Vertical (Diferenciada)
+        if is_flying:
+            # LÓGICA DE VOO: Movimento no ar com gravidade leve
+            self.change_y += BAT_GRAVITY_EFFECT  # Aplica gravidade leve interna
 
             dy = self.player_target.center_y - self.center_y
             dx = abs(self.player_target.center_x - self.center_x)
@@ -199,8 +206,11 @@ class Enemy(arcade.Sprite):
             vertical_dead_zone = BAT_HEIGHT_DEAD_ZONE
             if dx < BAT_PROXIMITY_RANGE:
                 vertical_dead_zone += BAT_PROXIMITY_DEAD_ZONE_BONUS
-                self.change_x *= BAT_PROXIMITY_HORIZONTAL_DRAG
+                self.change_x *= (
+                    BAT_PROXIMITY_HORIZONTAL_DRAG  # Atrito horizontal no ar
+                )
 
+            # Ajusta o intervalo de batida de asas para se aproximar do Y do jogador
             interval_adjustment = -dy * BAT_FLAP_INTERVAL_ADJUSTMENT_FACTOR
             current_interval = BAT_FLAP_BASE_INTERVAL + interval_adjustment
             current_interval = max(
@@ -210,24 +220,40 @@ class Enemy(arcade.Sprite):
             self.flap_timer += delta_time
             if self.flap_timer >= current_interval:
                 self.flap_timer = 0
-                self.change_y = BAT_FLAP_LIFT
+                self.change_y = BAT_FLAP_LIFT  # Impulso de voo
 
-            target_direction = 0
-            if self.player_target.center_x < self.center_x:
-                target_direction = -1
-            elif self.player_target.center_x > self.center_x:
-                target_direction = 1
-
+            # Aplica cambaleio horizontal
             wobble = random.uniform(-HORIZONTAL_WOBBLE, HORIZONTAL_WOBBLE)
-
-            self.change_x += target_direction * self.max_fly_speed * delta_time
-            self.change_x = max(
-                min(self.change_x, self.max_fly_speed), -self.max_fly_speed
-            )
             self.change_x += wobble * delta_time
 
+            # Limita a velocidade vertical com base no traço 'fly'
             max_v_speed = self.traits.get("fly", 1) * TRAIT_MULTIPLIER * 1.5
             self.change_y = max(min(self.change_y, max_v_speed), -max_v_speed)
+
+        else:
+            # LÓGICA DE SOLO/PLATAFORMA: Usa motor de física para gravidade e colisão
+
+            jump_trait = self.traits.get("jump", 0)
+
+            # Checa se o traço 'jump' está acima do limite
+            if (
+                jump_trait >= JUMP_THRESHOLD
+                and self.physics_engine
+                and self.jump_cooldown <= 0
+            ):
+                # Lógica de Pulo
+                player_higher = (
+                    self.player_target.center_y > self.center_y + self.height * 0.5
+                )
+                player_close_x = abs(self.player_target.center_x - self.center_x) < 150
+                random_jump_chance = random.randint(1, 100) == 1
+
+                if (
+                    (player_higher and player_close_x) or random_jump_chance
+                ) and self.physics_engine.can_jump():
+                    jump_force = jump_trait / MAX_TRAIT_VALUE * PLAYER_JUMP_FORCE
+                    self.change_y = jump_force
+                    self.jump_cooldown = self.JUMP_COOLDOWN_TIME
 
 
 class MyGame(arcade.Window):
@@ -258,16 +284,24 @@ class MyGame(arcade.Window):
         self.HIT_COOLDOWN_TIME = 1.0
         self.show_fitness_logs = True
 
+        # Variável de pontuação do jogador (A pontuação do jogo real foi removida)
+        self.player_score = 0
+
         # --- NOVOS ESTADOS DE JOGO E CONTROLE ---
         self.game_state = "PLAYING"  # 'PLAYING' ou 'EVOLUTION_SUMMARY'
         self.level = 1
         self.level_time = 0.0  # Tempo que o nível está rodando
         self.summary_data = None  # Dados para a tela de resumo
 
-        # Traços iniciais para a próxima geração
+        # Variável para rastrear se o Salto Genético ocorreu
+        self.shock_mutation_applied = False
+
+        # Traços iniciais para a próxima geração (todos têm os mesmos traços estruturais)
         self.next_generation_traits = [
-            {"run": 5.0, "fly": 1.0, "jump": 5.0, "type": "running"},
-            {"run": 1.0, "fly": 5.0, "jump": 1.0, "type": "flying"},
+            # Inimigo 1: Alto Fly (Voa)
+            {"run": 5.0, "fly": 5.0, "jump": 1.0},
+            # Inimigo 2: Baixo Fly (Anda)
+            {"run": 5.0, "fly": 1.0, "jump": 5.0},
         ]
 
     def setup(self):
@@ -276,6 +310,8 @@ class MyGame(arcade.Window):
         self.enemy_list = arcade.SpriteList()
         self.enemy_physics_engines = []
         self.hit_cooldown = 0.0
+        self.player_score = 0  # Zera a pontuação ao iniciar/resetar o setup
+        self.shock_mutation_applied = False  # Reseta o flag de mutação de choque
 
         # Carregamento do Mapa
         layer_options = {
@@ -324,11 +360,15 @@ class MyGame(arcade.Window):
         self.camera.position = (self.player_sprite.center_x, 0)
 
     def setup_generation(self, traits_list):
-        """Cria e posiciona a nova geração de inimigos com base em traits_list."""
+        """
+        Cria e posiciona a nova geração de inimigos com base em traits_list.
+        Define o motor de física com base no traço 'fly'.
+        """
         self.enemy_list = arcade.SpriteList()
         self.enemy_physics_engines = []
         self.level_time = 0.0  # Zera o tempo para a nova geração
         self.game_state = "PLAYING"  # Garante que o jogo está rodando
+        self.shock_mutation_applied = False  # Reseta o flag de mutação de choque
 
         player_spawn_layer = self.tile_map.object_lists.get("Player Start")
         spawn_point_x, spawn_point_y = 50, 200
@@ -353,99 +393,224 @@ class MyGame(arcade.Window):
             enemy.center_x = spawn_point_x + spawn_x_offsets[i]
             enemy.center_y = spawn_point_y + spawn_y_offsets[i]
 
+            # Marca o inimigo que recebeu mutação de choque na geração anterior para exibição
+            if i == 0 and self.summary_data and self.summary_data.get("shock_applied"):
+                enemy.is_shocked = True
+
             self.enemy_list.append(enemy)
 
-            # Inimigos terrestres precisam de motor de física de plataforma
-            if traits.get("type") != "flying":
+            is_flying = traits.get("fly", 0) >= FLY_THRESHOLD
+
+            # Inimigos terrestres (abaixo do FLY_THRESHOLD) precisam de motor de física
+            if not is_flying:
                 runner_engine = arcade.PhysicsEnginePlatformer(
                     enemy, gravity_constant=GRAVITY, walls=self.ground_list
                 )
                 self.enemy_physics_engines.append(runner_engine)
                 enemy.set_physics_engine(runner_engine)
+            else:
+                # Inimigos voadores não usam o motor de física de plataforma
+                enemy.set_physics_engine(None)
+
+        # Garante que o summary_data seja resetado após ser usado
+        self.summary_data = None
+
+    def _apply_mutation(
+        self, traits: dict, mutation_rate: float, key_to_shock: str = None
+    ) -> dict:
+        """
+        Aplica mutação a todos os traços do indivíduo e os limita.
+        Se key_to_shock for fornecido, aplica uma mutação de choque forte APENAS àquele traço.
+        """
+        new_traits = traits.copy()
+        trait_keys = ["run", "fly", "jump"]
+
+        for key in trait_keys:
+            base_value = new_traits.get(key, 1.0)
+
+            current_mutation_rate = mutation_rate
+
+            # Se for mutação de choque, usa a taxa de choque
+            if key == key_to_shock:
+                current_mutation_rate = SHOCK_MUTATION_RATE
+
+            # Se a taxa for 0, pula a mutação
+            if current_mutation_rate > 0.001:
+                # Mutação
+                mutation = random.uniform(-current_mutation_rate, current_mutation_rate)
+                new_value = base_value + mutation
+            else:
+                new_value = base_value
+
+            # Fixa o valor entre MIN_TRAIT_VALUE e MAX_TRAIT_VALUE
+            new_value = max(MIN_TRAIT_VALUE, min(MAX_TRAIT_VALUE, new_value))
+
+            new_traits[key] = new_value
+
+        return new_traits
+
+    def _crossover_and_mutate(self, parent1_traits: dict, parent2_traits: dict) -> dict:
+        """
+        Implementa o Crossover Simples (One-Point) e aplica Mutação do filho.
+        """
+        new_traits = {}
+        trait_keys = ["run", "fly", "jump"]
+
+        # Escolhe um ponto de cruzamento
+        crossover_point = random.randint(1, len(trait_keys) - 1)
+
+        # 1. Crossover (Herda de P1 e P2)
+        for i, key in enumerate(trait_keys):
+            if i < crossover_point:
+                # Herda do P1 antes do ponto de cruzamento
+                base_value = parent1_traits.get(key, 1.0)
+            else:
+                # Herda do P2 após o ponto de cruzamento
+                base_value = parent2_traits.get(key, 1.0)
+
+            new_traits[key] = base_value
+
+        # 2. Mutação
+        # Chama a função de mutação padrão (TRAIT_MUTATION_RATE), que garante a limitação (clamping)
+        child_traits = self._apply_mutation(new_traits, TRAIT_MUTATION_RATE)
+
+        return child_traits
 
     def evolve_enemies(self):
         """
-        Calcula os novos traços baseados no fitness da geração atual (média ponderada + mutação).
+        Calcula os novos traços baseados no fitness da geração atual (Seleção Elitista)
+        e aplica o Salto Genético se houver estagnação.
         """
-        total_fitness = 0.0
-        weighted_sum_run = 0.0
-        weighted_sum_fly = 0.0
-        weighted_sum_jump = 0.0
 
-        old_traits_list = []  # Armazena para o resumo
-        fitness_scores = []  # Armazena para o resumo
+        old_traits_list = [enemy.traits.copy() for enemy in self.enemy_list]
+        fitness_scores = []
 
-        if not self.enemy_list:
-            return
-
-        # 1. Calcular o Fitness Final e a Soma Total
+        # 1. Calcular Fitness e Identificar o ELITE
         for enemy in self.enemy_list:
             fitness = enemy.calculate_final_fitness()
-            total_fitness += fitness
-
-            old_traits_list.append(enemy.traits.copy())
             fitness_scores.append(fitness)
 
-            # Garante peso mínimo para inimigos com 0 fitness
-            weight = max(fitness, MIN_FITNESS_FOR_WEIGHTING)
+        if not fitness_scores:
+            return
 
-            # Soma ponderada dos traços
-            weighted_sum_run += enemy.traits["run"] * weight
-            weighted_sum_fly += enemy.traits["fly"] * weight
-            weighted_sum_jump += enemy.traits["jump"] * weight
+        min_fitness = min(fitness_scores)
+        max_fitness = max(fitness_scores)
+        avg_fitness = sum(fitness_scores) / len(fitness_scores)
 
-        # Se o fitness total for muito baixo (evitar problemas de ponderação se todos tiverem ~0)
-        if total_fitness < 0.1:
-            total_fitness = len(self.enemy_list)
-            # Recalcula as somas ponderadas com peso 1 (média simples)
-            for enemy in self.enemy_list:
-                weighted_sum_run += enemy.traits["run"] * 1
-                weighted_sum_fly += enemy.traits["fly"] * 1
-                weighted_sum_jump += enemy.traits["jump"] * 1
+        elite_index = fitness_scores.index(max_fitness)
+        elite_enemy = self.enemy_list[elite_index]
+        elite_traits_original = elite_enemy.traits.copy()
 
-        new_traits_base = {
-            "run": weighted_sum_run / total_fitness,
-            "fly": weighted_sum_fly / total_fitness,
-            "jump": weighted_sum_jump / total_fitness,
-        }
+        self.shock_mutation_applied = False
 
-        # 2. Criar a Nova Geração de Traços (Aplicando Mutação)
+        # --- Lógica de Salto Genético (Shock Mutation) ---
+        fitness_difference = max_fitness - min_fitness
+
+        if (
+            avg_fitness < STAGNATION_MIN_AVG_FITNESS
+            and fitness_difference < STAGNATION_FITNESS_DIFFERENCE
+        ):
+
+            self.shock_mutation_applied = True
+
+            # Escolhe um traço aleatório para receber o choque (exceto 'type' se existisse)
+            trait_keys = ["run", "fly", "jump"]
+            shock_key = random.choice(trait_keys)
+
+            print(
+                f"!!! ESTAGNAÇÃO DETECTADA (Avg={avg_fitness:.1f}, Diff={fitness_difference:.1f}) !!!"
+            )
+            print(
+                f"!!! Aplicando SALTO GENÉTICO no traço '{shock_key}' do Elite Mutado. !!!"
+            )
+
+            # Aplica mutação de choque APENAS ao traço escolhido
+            elite_traits_mutated = self._apply_mutation(
+                elite_traits_original, ELITE_MUTATION_RATE, shock_key
+            )
+        else:
+            # Comportamento padrão: Mutação leve no Elite (Exploração)
+            elite_traits_mutated = self._apply_mutation(
+                elite_traits_original, ELITE_MUTATION_RATE
+            )
+
+        # 3. Geração da Nova População (Seleção Elitista com Mutação)
         new_traits_list = []
-        for i, old_traits in enumerate(self.next_generation_traits):
-            new_traits = {"type": old_traits["type"]}
 
-            # Para cada traço, aplica o valor base ponderado + mutação aleatória
-            for trait_key in ["run", "fly", "jump"]:
+        # O Elite Mutado (ou chocado) é a primeira cópia
+        new_traits_list.append(elite_traits_mutated.copy())
 
-                mutation = random.uniform(-TRAIT_MUTATION_RATE, TRAIT_MUTATION_RATE)
-                new_value = new_traits_base.get(trait_key, 1.0) + mutation
+        # Geração dos Filhos (Crossover com o Elite Mutado como P1)
+        for i in range(len(self.enemy_list)):
 
-                # Fixa o valor entre MIN_TRAIT_VALUE e MAX_TRAIT_VALUE
-                new_value = max(MIN_TRAIT_VALUE, min(MAX_TRAIT_VALUE, new_value))
+            # Pula o índice do Elite original, pois ele já foi adicionado
+            if i == elite_index:
+                continue
 
-                new_traits[trait_key] = new_value
+            # Traço P1: Elite Mutado/Chocado
+            parent1_traits = elite_traits_mutated
 
-            new_traits_list.append(new_traits)
+            # Traço P2: Usamos uma cópia do Elite mutado como P2 para manter a forte influência
+            parent2_traits = elite_traits_mutated.copy()
 
+            # Crossover e Mutação do Filho (Mais agressiva)
+            child_traits = self._crossover_and_mutate(parent1_traits, parent2_traits)
+
+            # Adiciona o novo traço
+            new_traits_list.append(child_traits)
+
+        # Reorganiza a lista para que o Elite Mutado seja sempre o primeiro na nova lista
         self.next_generation_traits = new_traits_list
 
-        # 3. Armazenar dados do resumo
+        # 4. Armazenar dados do resumo
         self.summary_data = {
             "level": self.level,
             "time": self.level_time,
             "enemies": [],
+            "shock_applied": self.shock_mutation_applied,  # Passa o flag para o resumo
         }
 
+        # O novo elite é sempre o primeiro na self.next_generation_traits
+        elite_new_traits = self.next_generation_traits[0]
+        # Os filhos começam no índice 1.
+        child_trait_index = 1
+
+        # O loop de resumo usa a lista antiga (self.enemy_list) e a nova (self.next_generation_traits)
         for i, enemy in enumerate(self.enemy_list):
+
+            # Inferir o tipo para exibição
+            is_flying = enemy.traits.get("fly", 0) >= FLY_THRESHOLD
+            inferred_type = "Voando" if is_flying else "Andando"
+
+            # --- CORREÇÃO DO IndexError AQUI ---
+            if enemy is elite_enemy:
+                # O Elite (mutated/shocked) é sempre o primeiro na lista da próxima geração
+                new_traits_for_display = elite_new_traits
+            else:
+                # Os não-elites são mapeados para os filhos restantes (índices 1, 2, 3...)
+                # O índice do filho deve ser rastreado independentemente do índice do loop (i)
+                # pois o índice do elite pode quebrar a sequência.
+                if child_trait_index < len(self.next_generation_traits):
+                    new_traits_for_display = self.next_generation_traits[
+                        child_trait_index
+                    ]
+                    child_trait_index += 1  # Avança para o próximo traço de filho
+                else:
+                    # Fallback de segurança (não deve acontecer com a lógica correta)
+                    print("AVISO: Falha na contagem de traços de filhos.")
+                    new_traits_for_display = old_traits_list[i]
+            # --- FIM DA CORREÇÃO ---
+
             self.summary_data["enemies"].append(
                 {
                     "id": i + 1,
-                    "type": enemy.traits["type"],
+                    "type": inferred_type,  # Exibe o tipo inferido
                     "fitness": fitness_scores[i],
                     "hits": enemy.hits,
                     "proximity": enemy.proximity_score,
                     "old_traits": old_traits_list[i],
-                    "new_traits": new_traits_list[i],
+                    "new_traits": new_traits_for_display,
+                    "is_elite": enemy is elite_enemy,
                 }
             )
 
@@ -553,7 +718,9 @@ class MyGame(arcade.Window):
         for enemy in self.enemy_list:
             enemy.update_movement(delta_time)
 
-            if enemy.traits.get("type") == "flying":
+            # Apenas inimigos que não usam o motor de física de plataforma
+            # precisam de update manual para aplicar o change_x/y
+            if enemy.physics_engine is None:
                 enemy.update()
 
             # RASTREAMENTO DE FITNESS
@@ -572,10 +739,9 @@ class MyGame(arcade.Window):
                 enemy.hits += 1
                 self.hit_cooldown = self.HIT_COOLDOWN_TIME
 
+        # Atualiza apenas os motores de física dos inimigos que os possuem
         for engine in self.enemy_physics_engines:
             engine.update()
-
-        self.enemy_list.update()
 
         self.center_camera_to_player()
 
@@ -591,7 +757,6 @@ class MyGame(arcade.Window):
 
     def _get_trait_color(self, new_value, old_value):
         """Retorna a cor baseada na mudança de valor do traço (Melhorou=Verde, Piorou=Vermelho)."""
-        # Define uma tolerância para evitar cores para pequenas flutuações de ponto flutuante
         TOLERANCE = 0.005
 
         if new_value > old_value + TOLERANCE:
@@ -627,11 +792,25 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
 
+        # Alerta de Salto Genético
+        if self.summary_data.get("shock_applied"):
+            arcade.draw_text(
+                "SALTO GENÉTICO APLICADO (População Estagnada)!",
+                center_x,
+                SCREEN_HEIGHT - 90,
+                arcade.color.RED_ORANGE,
+                18,
+                anchor_x="center",
+            )
+            START_Y_OFFSET = SCREEN_HEIGHT - 130
+        else:
+            START_Y_OFFSET = SCREEN_HEIGHT - 110
+
         # Tempo de Nível
         arcade.draw_text(
             f"Tempo de Nível: {self.summary_data['time']:.2f} segundos",
             center_x,
-            SCREEN_HEIGHT - 110,
+            START_Y_OFFSET,
             arcade.color.LIGHT_GRAY,
             16,
             anchor_x="center",
@@ -649,7 +828,7 @@ class MyGame(arcade.Window):
             "TRAITS_START": 570,  # Ponto de início para a lista de 3 traços (Left Anchor)
         }
 
-        START_Y = SCREEN_HEIGHT - 170
+        START_Y = START_Y_OFFSET - 60
         LINE_HEIGHT = 20  # Altura de cada linha de texto
         ROW_SPACING = (
             LINE_HEIGHT * 3.5
@@ -668,13 +847,13 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
         arcade.draw_text(
-            "TIPO",
+            "COMPORT.",
             COL_X["TIPO"],
             START_Y,
             color_header,
             font_size_header,
             anchor_x="center",
-        )
+        )  # Alterado de "TIPO" para "COMPORT."
         arcade.draw_text(
             "FITNESS (F)",
             COL_X["FITNESS"],
@@ -727,27 +906,30 @@ class MyGame(arcade.Window):
             )
 
             # Colunas de Dados
-            arcade.draw_text(
-                f"{enemy_data['id']}",
-                COL_X["ID"],
-                y,
-                arcade.color.WHITE,
-                14,
-                anchor_x="center",
+            # Se for o Elite, destaca a linha
+            data_color = (
+                arcade.color.YELLOW if enemy_data["is_elite"] else arcade.color.WHITE
             )
+
+            arcade.draw_text(
+                f"{enemy_data['id']}", COL_X["ID"], y, data_color, 14, anchor_x="center"
+            )
+
+            # Exibe o COMPORTAMENTO INFERIDO
             arcade.draw_text(
                 enemy_data["type"].capitalize(),
                 COL_X["TIPO"],
                 y,
-                arcade.color.WHITE,
+                data_color,
                 14,
                 anchor_x="center",
             )
+
             arcade.draw_text(
                 f"{enemy_data['fitness']:.1f}",
                 COL_X["FITNESS"],
                 y,
-                arcade.color.YELLOW,
+                data_color,
                 14,
                 anchor_x="center",
             )
@@ -755,7 +937,7 @@ class MyGame(arcade.Window):
                 f"{enemy_data['hits']}",
                 COL_X["HITS"],
                 y,
-                arcade.color.WHITE,
+                data_color,
                 14,
                 anchor_x="center",
             )
@@ -763,7 +945,7 @@ class MyGame(arcade.Window):
                 f"{enemy_data['proximity']:.1f}",
                 COL_X["PROXIMIDADE"],
                 y,
-                arcade.color.WHITE,
+                data_color,
                 14,
                 anchor_x="center",
             )
@@ -785,7 +967,16 @@ class MyGame(arcade.Window):
             )
 
             # 2. FLY Trait
-            color_fly = self._get_trait_color(new["fly"], old["fly"])
+            # Destaca se o traço fly cruzou o limiar de voo
+            fly_crossed_threshold = (new["fly"] >= FLY_THRESHOLD) != (
+                old["fly"] >= FLY_THRESHOLD
+            )
+            color_fly = (
+                arcade.color.ORANGE
+                if fly_crossed_threshold
+                else self._get_trait_color(new["fly"], old["fly"])
+            )
+
             trait_text_fly = f"FLY: {old['fly']:.2f} -> {new['fly']:.2f}"
             arcade.draw_text(
                 trait_text_fly, COL_X["TRAITS_START"], y, color_fly, 12, anchor_x="left"
@@ -826,15 +1017,15 @@ class MyGame(arcade.Window):
 
         self.gui_camera.use()
 
-        # Desenha o número da Geração/Nível atual e tempo
+        # Desenha a Geração/Tempo
         if self.game_state == "PLAYING":
             arcade.draw_text(
                 f"Geração: {self.level} | Tempo: {self.level_time:.1f}s",
-                SCREEN_WIDTH - 250,
+                SCREEN_WIDTH - 10,
                 SCREEN_HEIGHT - 20,
                 arcade.color.DARK_BLUE,
                 16,
-                anchor_x="left",
+                anchor_x="right",
             )
 
         # Desenha os logs de fitness ou a tela de resumo
@@ -848,7 +1039,7 @@ class MyGame(arcade.Window):
                 12,
             )
 
-            y_offset = SCREEN_HEIGHT - 45
+            y_offset = SCREEN_HEIGHT - 65  # Ajustado para não colidir com a pontuação
 
             for i, enemy in enumerate(self.enemy_list):
                 fitness_score = (W_HITS * enemy.hits) + (
@@ -856,19 +1047,27 @@ class MyGame(arcade.Window):
                 )
                 traits_str = f"R:{enemy.traits['run']:.2f} | F:{enemy.traits['fly']:.2f} | J:{enemy.traits['jump']:.2f}"
 
-                text = f"E{i+1} ({enemy.traits.get('type')}): F={fitness_score:.1f} | Hits={enemy.hits} | {traits_str}"
+                # Exibe o modo de comportamento
+                is_flying = enemy.traits.get("fly", 0) >= FLY_THRESHOLD
+                mode_str = "VOO" if is_flying else "CHAO"
+
+                # Destaca se o inimigo é resultado de um choque na geração anterior
+                log_color = (
+                    arcade.color.RED_ORANGE if enemy.is_shocked else arcade.color.BLACK
+                )
+
+                text = f"E{i+1} ({mode_str}): F={fitness_score:.1f} | Hits={enemy.hits} | {traits_str}"
 
                 arcade.draw_text(
                     text,
                     10,
                     y_offset - (i * 20),
-                    arcade.color.BLACK,
+                    log_color,
                     14,
                 )
 
         elif self.game_state == "EVOLUTION_SUMMARY":
-            # Usa a função de desenho melhorada
-            self.draw_evolution_summary()  # Desenha a nova tela de resumo
+            self.draw_evolution_summary()
 
 
 def main():
