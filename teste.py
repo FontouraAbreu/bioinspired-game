@@ -44,7 +44,9 @@ STAGNATION_MIN_AVG_FITNESS = (
 STAGNATION_FITNESS_DIFFERENCE = (
     50.0  # Diferença máxima entre o melhor e o pior para ser 'parecido'
 )
-SHOCK_MUTATION_RATE = 3.0  # Magnitude forte da mutação de choque
+SHOCK_MUTATION_RATE = (
+    3.0  # Magnitude forte da mutação de choque (USADO NO TRAÇO DOMINANTE)
+)
 
 # --- CONSTANTES DE HABILIDADE ---
 FLY_THRESHOLD = 3.0  # Nível mínimo do traço 'fly' para o inimigo começar a voar.
@@ -479,7 +481,7 @@ class MyGame(arcade.Window):
     def evolve_enemies(self):
         """
         Calcula os novos traços baseados no fitness da geração atual (Seleção Elitista)
-        e aplica o Salto Genético se houver estagnação.
+        e aplica o Salto Genético se houver estagnação, mirando o traço dominante.
         """
 
         old_traits_list = [enemy.traits.copy() for enemy in self.enemy_list]
@@ -503,6 +505,21 @@ class MyGame(arcade.Window):
 
         self.shock_mutation_applied = False
 
+        # --- NOVO: Cálculo da Média de Traços e Traço Dominante ---
+        trait_sums = {"run": 0.0, "fly": 0.0, "jump": 0.0}
+
+        for traits in old_traits_list:
+            trait_sums["run"] += traits.get("run", 1.0)
+            trait_sums["fly"] += traits.get("fly", 1.0)
+            trait_sums["jump"] += traits.get("jump", 1.0)
+
+        num_enemies = len(old_traits_list)
+        trait_averages = {k: v / num_enemies for k, v in trait_sums.items()}
+
+        # Identifica o traço com o maior valor médio
+        dominant_trait = max(trait_averages, key=trait_averages.get)
+        # ----------------------------------------------------------
+
         # --- Lógica de Salto Genético (Shock Mutation) ---
         fitness_difference = max_fitness - min_fitness
 
@@ -513,15 +530,14 @@ class MyGame(arcade.Window):
 
             self.shock_mutation_applied = True
 
-            # Escolhe um traço aleatório para receber o choque (exceto 'type' se existisse)
-            trait_keys = ["run", "fly", "jump"]
-            shock_key = random.choice(trait_keys)
+            # Aplica o choque no traço mais dominante (o que está causando a estagnação)
+            shock_key = dominant_trait
 
             print(
                 f"!!! ESTAGNAÇÃO DETECTADA (Avg={avg_fitness:.1f}, Diff={fitness_difference:.1f}) !!!"
             )
             print(
-                f"!!! Aplicando SALTO GENÉTICO no traço '{shock_key}' do Elite Mutado. !!!"
+                f"!!! Aplicando SALTO GENÉTICO no traço MAIS EVOLUÍDO ('{shock_key}') do Elite Mutado. !!!"
             )
 
             # Aplica mutação de choque APENAS ao traço escolhido
@@ -568,6 +584,7 @@ class MyGame(arcade.Window):
             "time": self.level_time,
             "enemies": [],
             "shock_applied": self.shock_mutation_applied,  # Passa o flag para o resumo
+            "dominant_trait": dominant_trait,  # Novo dado para o resumo
         }
 
         # O novo elite é sempre o primeiro na self.next_generation_traits
@@ -582,14 +599,12 @@ class MyGame(arcade.Window):
             is_flying = enemy.traits.get("fly", 0) >= FLY_THRESHOLD
             inferred_type = "Voando" if is_flying else "Andando"
 
-            # --- CORREÇÃO DO IndexError AQUI ---
+            # Atribuição segura dos traços para exibição
             if enemy is elite_enemy:
                 # O Elite (mutated/shocked) é sempre o primeiro na lista da próxima geração
                 new_traits_for_display = elite_new_traits
             else:
                 # Os não-elites são mapeados para os filhos restantes (índices 1, 2, 3...)
-                # O índice do filho deve ser rastreado independentemente do índice do loop (i)
-                # pois o índice do elite pode quebrar a sequência.
                 if child_trait_index < len(self.next_generation_traits):
                     new_traits_for_display = self.next_generation_traits[
                         child_trait_index
@@ -597,9 +612,7 @@ class MyGame(arcade.Window):
                     child_trait_index += 1  # Avança para o próximo traço de filho
                 else:
                     # Fallback de segurança (não deve acontecer com a lógica correta)
-                    print("AVISO: Falha na contagem de traços de filhos.")
                     new_traits_for_display = old_traits_list[i]
-            # --- FIM DA CORREÇÃO ---
 
             self.summary_data["enemies"].append(
                 {
@@ -794,8 +807,9 @@ class MyGame(arcade.Window):
 
         # Alerta de Salto Genético
         if self.summary_data.get("shock_applied"):
+            dominant_trait = self.summary_data.get("dominant_trait", "N/D")
             arcade.draw_text(
-                "SALTO GENÉTICO APLICADO (População Estagnada)!",
+                f"SALTO GENÉTICO APLICADO (População Estagnada) no traço: {dominant_trait.upper()}!",
                 center_x,
                 SCREEN_HEIGHT - 90,
                 arcade.color.RED_ORANGE,
@@ -1026,6 +1040,14 @@ class MyGame(arcade.Window):
                 arcade.color.DARK_BLUE,
                 16,
                 anchor_x="right",
+            )
+            arcade.draw_text(
+                f"Pontuação: {self.player_score}",
+                10,
+                SCREEN_HEIGHT - 40,
+                arcade.color.DARK_BLUE,
+                18,
+                anchor_x="left",
             )
 
         # Desenha os logs de fitness ou a tela de resumo
