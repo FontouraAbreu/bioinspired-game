@@ -12,20 +12,20 @@ import random
 import math
 
 # --- Configurações do Jogo ---
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
+# Restaurando as dimensões fixas da tela para simplificar a câmera
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
 SCREEN_TITLE = "Plataforma com Evolução de Inimigos"
 
-# Zoom da Câmera (1.0 = normal, 1.5 = 50% mais zoom)
-CAMERA_ZOOM = 1.5
-CAMERA_SMOOTHING = 0.1  # Fator de suavização para a câmera (LERP)
+# Zoom da câmera: 2.0 significa que você verá metade do que via antes, ou seja, a câmera está 2x mais perto
+CAMERA_ZOOM = 3.0
 
 # Nome do arquivo de mapa Tiled
 MAP_NAME = "assets/test_level.tmx"
 
 # Constantes do Jogo
-PLAYER_SCALE = 0.6  # Escala do jogador aumentada (era 0.4)
-ENEMY_SCALE = 0.3  # Escala do inimigo reduzida (era 0.4)
+PLAYER_SCALE = 0.6  # Escala do jogador
+ENEMY_SCALE = 0.3  # Escala do inimigo
 PLAYER_MOVEMENT_SPEED = 5
 PLAYER_JUMP_FORCE = 10
 GRAVITY = 0.7
@@ -37,23 +37,19 @@ ENEMY_ACCELERATION = 0.25
 ENEMY_FRICTION = 0.95
 ENEMY_DRIFT_DECELERATION = 0.6
 
-MAX_TRAIT_VALUE = 5.0  # Alterado para float para consistência
-MIN_TRAIT_VALUE = 1.0  # Alterado para float para consistência
-TRAIT_MUTATION_RATE = 0.5  # A magnitude da mutação
-
-# Nova constante para reduzir a oscilação do inimigo mais apto (melhor fitness)
+MAX_TRAIT_VALUE = 5.0
+MIN_TRAIT_VALUE = 1.0
+TRAIT_MUTATION_RATE = 0.5
 BEST_ENEMY_MUTATION_FACTOR = 0.1
 
 # --- CONSTANTES DE FITNESS ---
 PROXIMITY_SCORING_CONSTANT = 100.0
 MIN_DISTANCE_EPSILON = 1.0
-
-# Peso mínimo para um inimigo influenciar a evolução (evita divisão por zero)
 MIN_FITNESS_FOR_WEIGHTING = 0.01
 
 # PESOS DE FITNESS
-W_HITS = 1000.0  # Peso para cada Hit (H)
-W_PROXIMITY = 1.0  # Peso para a Pontuação de Proximidade (A)
+W_HITS = 1000.0
+W_PROXIMITY = 1.0
 
 # Limite de distância para considerar um "Hit"
 HIT_SCORE_THRESHOLD = 20
@@ -73,7 +69,6 @@ BAT_PROXIMITY_HORIZONTAL_DRAG = 0.7
 TRAIT_MULTIPLIER = 0.5
 
 # Configurações de Câmera e Cor
-DEAD_ZONE_X = 150
 BACKGROUND_COLOR = (173, 216, 230)
 
 
@@ -245,9 +240,9 @@ class MyGame(arcade.Window):
     Classe Principal do Jogo - Gerencia o Player, Inimigos Evolutivos e Estados de Jogo.
     """
 
-    def __init__(self, width, height, title):
+    def __init__(self, width=SCREEN_WIDTH, height=SCREEN_HEIGHT, title=SCREEN_TITLE):
+        # Usamos as constantes fixas da tela
         super().__init__(width, height, title)
-        arcade.set_background_color(BACKGROUND_COLOR)
 
         self.player_list = None
         self.enemy_list = None
@@ -255,14 +250,21 @@ class MyGame(arcade.Window):
 
         self.tile_map = None
         self.ground_list = None
-        self.foreground_list = None  # Lista para a camada Foreground
+        self.foreground_list = None
         self.player_sprite = None
-        self.map_width_pixels = 0
-        self.tile_size = 32
 
-        # Câmeras
-        self.camera = arcade.camera.Camera2D(zoom=CAMERA_ZOOM)  # Aplica o ZOOM
+        # Dimensões do mapa em pixels (calculadas no setup)
+        self.map_width_pixels = 0
+        self.map_height_pixels = 0
+        self.tile_size = 16
+
+        # Inicializa câmeras
+        self.camera = arcade.camera.Camera2D()
         self.gui_camera = arcade.camera.Camera2D()
+
+        # --- APLICA O ZOOM NO MUNDO DO JOGO ---
+        self.camera.zoom = CAMERA_ZOOM
+
         self.physics_engine = None
 
         self.left_pressed = False
@@ -272,10 +274,10 @@ class MyGame(arcade.Window):
         self.show_fitness_logs = True
 
         # --- NOVOS ESTADOS DE JOGO E CONTROLE ---
-        self.game_state = "PLAYING"  # 'PLAYING' ou 'EVOLUTION_SUMMARY'
+        self.game_state = "PLAYING"
         self.level = 1
-        self.level_time = 0.0  # Tempo que o nível está rodando
-        self.summary_data = None  # Dados para a tela de resumo
+        self.level_time = 0.0
+        self.summary_data = None
 
         # Traços iniciais para a próxima geração
         self.next_generation_traits = [
@@ -283,80 +285,87 @@ class MyGame(arcade.Window):
             {"run": 1.0, "fly": 5.0, "jump": 1.0, "type": "flying"},
         ]
 
+    def on_resize(self, width: float, height: float):
+        """
+        Chamado quando a janela é redimensionada.
+        Ajusta as câmeras para o novo tamanho e reafirma o zoom.
+        """
+        super().on_resize(width, height)
+        # Redimensiona as câmeras para o novo viewport
+        # self.camera.resize(width, height)
+        # self.gui_camera.resize(width, height)
+
+        # Reaplicamos o zoom após redimensionar para manter a proximidade
+        self.camera.zoom = CAMERA_ZOOM
+
     def setup(self):
         """Configura o mapa e o player (Chamado apenas uma vez no início)."""
-        self.player_list = arcade.SpriteList()
-        self.enemy_list = arcade.SpriteList()
-        self.enemy_physics_engines = []
-        self.hit_cooldown = 0.0
 
-        # Carregamento do Mapa
         COLLISION_LAYER_NAME = "colission layer"
-        FOREGROUND_LAYER_NAME = "Foreground"  # Nome da camada Foreground
+        FOREGROUND_LAYER_NAME = "Foreground"
+        PLAYER_START_LAYER_NAME = "Player Start"
 
-        # Apenas a camada de colisão precisa ter spatial_hash e ser listada nas opções.
         layer_options = {
             COLLISION_LAYER_NAME: {
                 "use_spatial_hash": True,
             }
         }
+
+        # Define a cor de fundo
+        arcade.set_background_color(BACKGROUND_COLOR)
+
         self.tile_map = arcade.load_tilemap(
             MAP_NAME, scaling=1.0, layer_options=layer_options
         )
+
+        # 2. Calcula as dimensões do mapa em pixels
         self.map_width_pixels = self.tile_map.width * self.tile_map.tile_width
+        self.map_height_pixels = self.tile_map.height * self.tile_map.tile_height
         self.tile_size = self.tile_map.tile_width
 
-        # LISTA DE CHÃO/COLISÃO
+        # Configuração das listas e camadas
+        self.player_list = arcade.SpriteList()
+        self.enemy_list = arcade.SpriteList()
+        self.enemy_physics_engines = []
+        self.hit_cooldown = 0.0
+
         self.ground_list = self.tile_map.sprite_lists.get(COLLISION_LAYER_NAME)
+        self.foreground_list = self.tile_map.sprite_lists.get(
+            FOREGROUND_LAYER_NAME, arcade.SpriteList()
+        )
 
-        # LISTA DE FOREGROUND (Não colidível)
-        # Se a camada "Foreground" existir no mapa, carrega para esta lista.
-        if FOREGROUND_LAYER_NAME in self.tile_map.sprite_lists:
-            self.foreground_list = self.tile_map.sprite_lists[FOREGROUND_LAYER_NAME]
-        else:
-            self.foreground_list = arcade.SpriteList()
-
-        # Trata o caso de a camada não ser encontrada (fallback)
         if self.ground_list is None:
             print(
-                f"ATENÇÃO: A camada '{COLLISION_LAYER_NAME}' não foi encontrada no Tiled Map. A colisão pode falhar."
+                f"ATENÇÃO: A camada '{COLLISION_LAYER_NAME}' não foi encontrada. Usando SpriteList vazia."
             )
-            # Cria uma lista vazia para evitar erros
             self.ground_list = arcade.SpriteList()
-
-        if self.foreground_list is None:
-            print(
-                f"ATENÇÃO: A camada '{FOREGROUND_LAYER_NAME}' não foi encontrada. O foreground será ignorado."
-            )
-            self.foreground_list = arcade.SpriteList()
 
         # Configuração do Player
         self.player_sprite = arcade.Sprite(
             ":resources:images/animated_characters/female_person/femalePerson_idle.png",
-            PLAYER_SCALE,  # Usa a nova escala
+            PLAYER_SCALE,
         )
-        # Ajusta dimensões com base na nova escala
         self.player_sprite.width = self.tile_size * 0.8 * (PLAYER_SCALE / 0.4)
         self.player_sprite.height = self.tile_size * 0.8 * (PLAYER_SCALE / 0.4)
 
-        player_spawn_layer = self.tile_map.object_lists.get("Player Start")
-        spawn_point_x, spawn_point_y = 50, 200
-        # O código fornecido parece tentar pegar as coordenadas do primeiro objeto da camada de objetos
+        # Ponto de Spawn do Player
+        player_spawn_layer = self.tile_map.object_lists.get(PLAYER_START_LAYER_NAME)
+        spawn_point_x, spawn_point_y = 50, 200  # Fallback
+
         if player_spawn_layer and player_spawn_layer[0]:
-            # Assumindo que o primeiro item é uma tupla de coordenadas como em códigos anteriores
             try:
-                # Tenta pegar a primeira coordenada do objeto (comum para ponto de spawn)
-                spawn_point_x = player_spawn_layer[0].shape[0]
-                spawn_point_y = player_spawn_layer[0].shape[1]
-            except:
-                # Fallback seguro
+                spawn_point_x = player_spawn_layer[0].center_x
+                spawn_point_y = player_spawn_layer[0].center_y
+            except Exception as e:
+                print(
+                    f"Erro ao obter ponto de spawn do Player: {e}. Usando fallback ({spawn_point_x}, {spawn_point_y})."
+                )
                 pass
 
         self.player_sprite.center_x = spawn_point_x
         self.player_sprite.center_y = spawn_point_y
         self.player_list.append(self.player_sprite)
 
-        # Motor de Física do Player usa self.ground_list
         self.physics_engine = arcade.PhysicsEnginePlatformer(
             self.player_sprite, gravity_constant=GRAVITY, walls=self.ground_list
         )
@@ -369,30 +378,26 @@ class MyGame(arcade.Window):
         self.level_time = 0.0
         self.left_pressed = False
         self.right_pressed = False
-        # A câmera é centralizada na primeira atualização do on_update
-        self.camera.position = (
-            self.player_sprite.center_x - SCREEN_WIDTH / (2 * CAMERA_ZOOM),
-            0,
-        )
+
+        # Centraliza a câmera no jogador instantaneamente no setup
+        self.center_camera_to_player(instant=True)
 
     def setup_generation(self, traits_list):
         """Cria e posiciona a nova geração de inimigos com base em traits_list."""
         self.enemy_list = arcade.SpriteList()
         self.enemy_physics_engines = []
-        self.level_time = 0.0  # Zera o tempo para a nova geração
-        self.game_state = "PLAYING"  # Garante que o jogo está rodando
+        self.level_time = 0.0
+        self.game_state = "PLAYING"
 
-        player_spawn_layer = self.tile_map.object_lists.get("Player Start")
+        PLAYER_START_LAYER_NAME = "Player Start"
+        player_spawn_layer = self.tile_map.object_lists.get(PLAYER_START_LAYER_NAME)
         spawn_point_x, spawn_point_y = 50, 200
-        # O código fornecido parece tentar pegar as coordenadas do primeiro objeto da camada de objetos
+
         if player_spawn_layer and player_spawn_layer[0]:
-            # Assumindo que o primeiro item é uma tupla de coordenadas como em códigos anteriores
             try:
-                # Tenta pegar a primeira coordenada do objeto (comum para ponto de spawn)
-                spawn_point_x = player_spawn_layer[0].shape[0]
-                spawn_point_y = player_spawn_layer[0].shape[1]
-            except:
-                # Fallback seguro
+                spawn_point_x = player_spawn_layer[0].center_x
+                spawn_point_y = player_spawn_layer[0].center_y
+            except Exception:
                 pass
 
         self.player_sprite.center_x = spawn_point_x
@@ -401,25 +406,20 @@ class MyGame(arcade.Window):
         self.player_sprite.change_y = 0
 
         for i, traits in enumerate(traits_list):
-            enemy = Enemy(
-                traits, "circle_placeholder", ENEMY_SCALE
-            )  # Usa a nova escala
+            enemy = Enemy(traits, "circle_placeholder", ENEMY_SCALE)
             enemy.set_target(self.player_sprite)
 
-            # Reposiciona o inimigo
-            spawn_x_offsets = [150, 300]  # Garante que os offsets existam
-            spawn_y_offsets = [0, 100]
+            spawn_x_offsets = [100, 250, 400]
+            spawn_y_offsets = [0, 50, 100]
 
-            offset_index = i % len(
-                spawn_x_offsets
-            )  # Usa o operador módulo para lidar com listas menores
+            offset_index = i % len(spawn_x_offsets)
+            y_offset = spawn_y_offsets[i % len(spawn_y_offsets)] + self.tile_size * 0.5
 
             enemy.center_x = spawn_point_x + spawn_x_offsets[offset_index]
-            enemy.center_y = spawn_point_y + spawn_y_offsets[offset_index]
+            enemy.center_y = spawn_point_y + y_offset
 
             self.enemy_list.append(enemy)
 
-            # Inimigos terrestres precisam de motor de física de plataforma
             if traits.get("type") != "flying":
                 runner_engine = arcade.PhysicsEnginePlatformer(
                     enemy, gravity_constant=GRAVITY, walls=self.ground_list
@@ -427,37 +427,29 @@ class MyGame(arcade.Window):
                 self.enemy_physics_engines.append(runner_engine)
                 enemy.set_physics_engine(runner_engine)
 
+        # Centraliza a câmera no jogador após o spawn
+        self.center_camera_to_player(instant=True)
+
     def _crossover_and_mutate(
         self, parent1_traits: dict, parent2_traits: dict, mutation_rate: float
     ) -> dict:
         """
         Implementa o Crossover Simples (One-Point) e aplica Mutação.
-        Parent1: O inimigo Elite (Melhor Fitness)
-        Parent2: O inimigo correspondente da geração anterior (para manter o tipo)
-
-        Aceita mutation_rate dinâmico para aplicar mutação suave no Elite.
         """
         new_traits = {"type": parent1_traits["type"]}
         trait_keys = ["run", "fly", "jump"]
 
-        # Escolhe um ponto de cruzamento (entre 1 e 2, garantindo que pelo menos 1 traço é herdado do Parent1)
         crossover_point = random.randint(1, len(trait_keys) - 1)
 
-        # 1. Crossover (Herda de P1 e P2)
         for i, key in enumerate(trait_keys):
             if i < crossover_point:
-                # Herda do Elite (Parent1) antes do ponto de cruzamento
                 base_value = parent1_traits.get(key, 1.0)
             else:
-                # Herda do P2 (o tipo correspondente) após o ponto de cruzamento
                 base_value = parent2_traits.get(key, 1.0)
 
-            # 2. Mutação
-            # Usa a taxa de mutação dinâmica
             mutation = random.uniform(-mutation_rate, mutation_rate)
             new_value = base_value + mutation
 
-            # Fixa o valor entre MIN_TRAIT_VALUE e MAX_TRAIT_VALUE
             new_value = max(MIN_TRAIT_VALUE, min(MAX_TRAIT_VALUE, new_value))
 
             new_traits[key] = new_value
@@ -467,11 +459,10 @@ class MyGame(arcade.Window):
     def evolve_enemies(self):
         """
         Calcula os novos traços baseados no fitness da geração atual (Seleção Elitista).
-        Implementa a Mutação Suave no inimigo mais apto.
         """
 
-        old_traits_list = []  # Armazena para o resumo
-        fitness_scores = []  # Armazena para o resumo
+        old_traits_list = []
+        fitness_scores = []
 
         if not self.enemy_list:
             return
@@ -497,7 +488,6 @@ class MyGame(arcade.Window):
         new_traits_list_ordered = []
         elite_mutation_rate = TRAIT_MUTATION_RATE * BEST_ENEMY_MUTATION_FACTOR
 
-        # Itera sobre a lista de inimigos da geração anterior para manter a ordem e os tipos
         for i, old_enemy in enumerate(self.enemy_list):
 
             parent1_traits = elite_traits
@@ -505,23 +495,21 @@ class MyGame(arcade.Window):
             enemy_type = old_enemy.traits["type"]
 
             if old_enemy is elite_enemy:
-                # 2a. O Elite: Mutação Suave (cruza consigo mesmo, taxa reduzida)
-                # Garante que o Elite sofra APENAS uma pequena oscilação
+                # O Elite: Mutação Suave (taxa reduzida)
                 child_traits = self._crossover_and_mutate(
                     parent1_traits,
-                    parent1_traits,  # P2 é o próprio Elite para garantir 100% de herança do Elite
-                    elite_mutation_rate,  # Taxa de mutação reduzida
+                    parent1_traits,
+                    elite_mutation_rate,
                 )
             else:
-                # 2b. Os Filhos: Crossover com o Elite + Mutação Normal
-                # O P1 é o Elite, P2 é o inimigo que está sendo substituído (para manter o tipo)
+                # Os Filhos: Crossover com o Elite + Mutação Normal
                 child_traits = self._crossover_and_mutate(
                     parent1_traits,
                     parent2_traits,
-                    TRAIT_MUTATION_RATE,  # Taxa de mutação normal
+                    TRAIT_MUTATION_RATE,
                 )
 
-            child_traits["type"] = enemy_type  # Garante que o tipo é mantido
+            child_traits["type"] = enemy_type
             new_traits_list_ordered.append(child_traits)
 
         self.next_generation_traits = new_traits_list_ordered
@@ -533,8 +521,6 @@ class MyGame(arcade.Window):
             "enemies": [],
         }
 
-        # O loop de resumo deve usar a lista antiga (self.enemy_list) e a nova (self.next_generation_traits)
-        # que agora tem o mesmo índice de tipos.
         for i, enemy in enumerate(self.enemy_list):
             self.summary_data["enemies"].append(
                 {
@@ -544,28 +530,22 @@ class MyGame(arcade.Window):
                     "hits": enemy.hits,
                     "proximity": enemy.proximity_score,
                     "old_traits": old_traits_list[i],
-                    "new_traits": self.next_generation_traits[
-                        i
-                    ],  # Usa a nova lista ordenada
+                    "new_traits": self.next_generation_traits[i],
                     "is_elite": enemy is elite_enemy,
                 }
             )
 
     def simulate_level_end(self):
         """Simula o fim do nível, executa a evolução e entra no estado de resumo."""
-
-        # 1. Executa a Evolução
         self.evolve_enemies()
-
-        # 2. Incrementa o nível e muda o estado
         self.level += 1
-        self.game_state = "EVOLUTION_SUMMARY"  # PAUSA O JOGO
+        self.game_state = "EVOLUTION_SUMMARY"
 
     def continue_to_next_generation(self):
         """Continua para o próximo nível após o resumo."""
         self.setup_generation(self.next_generation_traits)
-        self.game_state = "PLAYING"  # Reinicia o jogo
-        self.level_time = 0.0  # Garante que o tempo está zerado
+        self.game_state = "PLAYING"
+        self.level_time = 0.0
         self.summary_data = None
         self.hit_cooldown = 0.0
 
@@ -594,11 +574,9 @@ class MyGame(arcade.Window):
             if self.physics_engine.can_jump():
                 self.player_sprite.change_y = PLAYER_JUMP_FORCE
 
-        # Toggle do Log de Fitness com 'G'
         elif key == arcade.key.G:
             self.show_fitness_logs = not self.show_fitness_logs
 
-        # Fim de Nível e Evolução com '0'
         elif key == arcade.key.KEY_0:
             self.simulate_level_end()
 
@@ -616,64 +594,38 @@ class MyGame(arcade.Window):
 
         self.apply_movement()
 
-    def center_camera_to_player(self):
-        """Move a câmera suavemente para centralizar o jogador (ou mantê-lo na dead zone)."""
-
-        # 1. POSIÇÃO ALVO (Onde o canto inferior esquerdo da câmera deve estar)
-
-        # Dimensões visíveis do viewport (ajustadas pelo zoom)
-        adjusted_view_width = SCREEN_WIDTH / CAMERA_ZOOM
-
-        # O centro do viewport (em coordenadas do mapa)
-        center_x_in_map = adjusted_view_width / 2
-
-        # A posição alvo ideal da câmera é o centro do jogador menos a metade da largura visível
-        target_camera_x = self.player_sprite.center_x - center_x_in_map
-
-        # Target Y é fixo em 0 para plataformas 2D que só rolam horizontalmente
-        target_camera_y = 0
-
-        # 2. APLICAÇÃO DA DEAD ZONE (Se o jogador estiver dentro da zona, a câmera não se move)
-
-        # Posição atual da câmera no mapa (canto inferior esquerdo)
-        current_camera_x, current_camera_y = self.camera.position
-
-        # Dead zone ajustada pelo zoom
-        adjusted_dead_zone_x = DEAD_ZONE_X / CAMERA_ZOOM
-
-        # Calcula a margem esquerda e direita da dead zone em relação à posição ATUAL da câmera
-        dead_zone_left = current_camera_x + center_x_in_map - adjusted_dead_zone_x
-        dead_zone_right = current_camera_x + center_x_in_map + adjusted_dead_zone_x
-
-        # Se o jogador estiver dentro da dead zone, a posição alvo é a posição atual da câmera
-        if dead_zone_left <= self.player_sprite.center_x <= dead_zone_right:
-            target_camera_x = current_camera_x
-
-        # 3. LIMITES DO MAPA (Impede que a câmera ultrapasse as bordas do mapa)
-
-        max_scroll_x = self.map_width_pixels - adjusted_view_width
-
-        # Aplica limites
-        target_camera_x = max(0, target_camera_x)
-        target_camera_x = min(max_scroll_x, target_camera_x)
-
-        # 4. MOVIMENTO SUAVE (LERP)
-        # LERP (Interpolação Linear): new_value = (old_value * (1-factor)) + (target_value * factor)
-
-        # X suave
-        new_x = (current_camera_x * (1 - CAMERA_SMOOTHING)) + (
-            target_camera_x * CAMERA_SMOOTHING
+    def center_camera_to_player(self, instant=False):
+        """
+        Calcula a posição da câmera para centralizar o jogador e move a câmera.
+        """
+        # Posição do jogador no mundo
+        screen_center_x = self.player_sprite.center_x - (self.camera.viewport_width / 2)
+        screen_center_y = self.player_sprite.center_y - (
+            self.camera.viewport_height / 2
         )
 
-        # Y suave (Geralmente 0, mas LERP garante transição suave se Y for necessário)
-        new_y = (current_camera_y * (1 - CAMERA_SMOOTHING)) + (
-            target_camera_y * CAMERA_SMOOTHING
-        )
+        # Se a posição central for negativa, corrige para 0 (não permite que a câmera saia do mapa na esquerda/baixo)
+        if screen_center_x < 0:
+            screen_center_x = 0
+        if screen_center_y < 0:
+            screen_center_y = 0
 
-        camera_position_to_set = (round(new_x), round(new_y))
+        # Limita a rolagem para que a borda direita/superior do mapa seja o limite
+        if screen_center_x + self.camera.viewport_width > self.map_width_pixels:
+            screen_center_x = self.map_width_pixels - self.camera.viewport_width
+        if screen_center_y + self.camera.viewport_height > self.map_height_pixels:
+            screen_center_y = self.map_height_pixels - self.camera.viewport_height
 
-        # Move a câmera ajustando diretamente a posição
-        self.camera.position = camera_position_to_set
+        # Garante que o screen_center_x/y nunca seja negativo após a limitação
+        screen_center_x = max(0, screen_center_x)
+        screen_center_y = max(0, screen_center_y)
+
+        camera_center_position = (screen_center_x, screen_center_y)
+
+        # Move a câmera instantaneamente para a nova posição (requerido pelo usuário)
+        # O argumento instant=True não é usado aqui, mas manteremos o parâmetro
+        # para referência futura se quisermos movimento suave.
+        self.camera.position = self.player_sprite.position
 
     def on_update(self, delta_time):
         """Lógica de atualização a cada frame."""
@@ -681,7 +633,7 @@ class MyGame(arcade.Window):
         if self.game_state != "PLAYING":
             return
 
-        self.level_time += delta_time  # Rastreia o tempo apenas se estiver jogando
+        self.level_time += delta_time
 
         self.physics_engine.update()
         if self.hit_cooldown > 0:
@@ -699,7 +651,6 @@ class MyGame(arcade.Window):
             dy = self.player_sprite.center_y - enemy.center_y
             distance = math.sqrt(dx**2 + dy**2)
 
-            # Pontuação de Proximidade Cumulativa
             proximity_increment = (
                 PROXIMITY_SCORING_CONSTANT / (distance + MIN_DISTANCE_EPSILON)
             ) * delta_time
@@ -715,6 +666,7 @@ class MyGame(arcade.Window):
 
         self.enemy_list.update()
 
+        # A CÂMERA DEVE SEGUIR O JOGADOR A CADA FRAME
         self.center_camera_to_player()
 
         # Se o player cair do mapa, reseta a geração (não evolui)
@@ -727,9 +679,7 @@ class MyGame(arcade.Window):
 
     def _get_trait_color(self, new_value, old_value):
         """Retorna a cor baseada na mudança de valor do traço (Melhorou=Verde, Piorou=Vermelho)."""
-        # Define uma tolerância para evitar cores para pequenas flutuações de ponto flutuante
         TOLERANCE = 0.005
-
         if new_value > old_value + TOLERANCE:
             return arcade.color.GREEN
         elif new_value < old_value - TOLERANCE:
@@ -740,16 +690,19 @@ class MyGame(arcade.Window):
     def draw_evolution_summary(self):
         """Desenha a tela de resumo da evolução com layout melhorado."""
 
-        # ------------------- Fundo Semi-Transparente (Cobre a tela inteira) -------------------
+        # Usamos as dimensões fixas da tela para o GUI
+        screen_width, screen_height = SCREEN_WIDTH, SCREEN_HEIGHT
+
+        # ------------------- Fundo Semi-Transparente -------------------
         arcade.draw_lrbt_rectangle_filled(
             0,
-            SCREEN_WIDTH,
+            screen_width,
             0,
-            SCREEN_HEIGHT,
-            (0, 0, 0, 220),  # Preto com 85% de opacidade
+            screen_height,
+            (0, 0, 0, 220),
         )
 
-        center_x = SCREEN_WIDTH / 2
+        center_x = screen_width / 2
 
         # ------------------- TÍTULOS E SUBTÍTULOS -------------------
 
@@ -757,7 +710,7 @@ class MyGame(arcade.Window):
         arcade.draw_text(
             f"RESUMO DA EVOLUÇÃO - FIM DA GERAÇÃO {self.summary_data['level']}",
             center_x,
-            SCREEN_HEIGHT - 60,
+            screen_height - 60,
             arcade.color.YELLOW_ORANGE,
             28,
             anchor_x="center",
@@ -767,7 +720,7 @@ class MyGame(arcade.Window):
         arcade.draw_text(
             f"Tempo de Nível: {self.summary_data['time']:.2f} segundos",
             center_x,
-            SCREEN_HEIGHT - 110,
+            screen_height - 110,
             arcade.color.LIGHT_GRAY,
             16,
             anchor_x="center",
@@ -775,21 +728,18 @@ class MyGame(arcade.Window):
 
         # ------------------- TABELA DE DADOS -------------------
 
-        # Posições X para cada coluna (coordenadas de tela otimizadas)
         COL_X = {
             "ID": 80,
             "TIPO": 180,
             "FITNESS": 300,
             "HITS": 380,
             "PROXIMIDADE": 480,
-            "TRAITS_START": 570,  # Ponto de início para a lista de 3 traços (Left Anchor)
+            "TRAITS_START": 570,
         }
 
-        START_Y = SCREEN_HEIGHT - 170
-        LINE_HEIGHT = 20  # Altura de cada linha de texto
-        ROW_SPACING = (
-            LINE_HEIGHT * 3.5
-        )  # Espaçamento entre inimigos (inclui 3 linhas de traços + margem)
+        START_Y = screen_height - 170
+        LINE_HEIGHT = 20
+        ROW_SPACING = LINE_HEIGHT * 3.5
 
         # Cabeçalho da Tabela
         color_header = arcade.color.CYAN
@@ -836,7 +786,6 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
 
-        # O cabeçalho da coluna de Traços é centralizado sobre as três linhas de traço
         arcade.draw_text(
             "EVOLUÇÃO DOS TRAÇOS",
             COL_X["TRAITS_START"] + 100,
@@ -846,7 +795,7 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
 
-        START_Y -= LINE_HEIGHT * 1.5  # Espaço após o cabeçalho
+        START_Y -= LINE_HEIGHT * 1.5
 
         # Linhas de Dados
         for i, enemy_data in enumerate(self.summary_data["enemies"]):
@@ -855,15 +804,14 @@ class MyGame(arcade.Window):
             # Linha Separadora
             arcade.draw_line(
                 50,
-                y + LINE_HEIGHT * 2,  # Posição superior da linha
-                SCREEN_WIDTH - 50,
+                y + LINE_HEIGHT * 2,
+                screen_width - 50,
                 y + LINE_HEIGHT * 2,
                 arcade.color.DARK_SLATE_GRAY,
                 1,
             )
 
             # Colunas de Dados
-            # Se for o Elite, destaca a linha
             data_color = (
                 arcade.color.YELLOW if enemy_data["is_elite"] else arcade.color.WHITE
             )
@@ -954,28 +902,30 @@ class MyGame(arcade.Window):
         """Renderiza a tela."""
         self.clear()
 
+        # 1. Desenhar o MUNDO DO JOGO (mapa, player, inimigos) usando a CAMERA
         self.camera.use()
 
-        # Desenha as camadas do Tiled Map que formam o fundo e o chão de colisão.
         if self.ground_list:
             self.ground_list.draw()
 
-        # Desenha a camada de foreground para que o Player e Inimigos fiquem EM CIMA
         if self.foreground_list:
             self.foreground_list.draw()
 
-        # Desenha o jogador e os inimigos (PRIMEIRO PLANO)
         self.player_list.draw()
         self.enemy_list.draw()
 
+        # 2. Desenhar o HUD/GUI (texto, placar) usando a GUI_CAMERA para fixar na tela
         self.gui_camera.use()
+
+        # Usamos as dimensões fixas da tela para o GUI
+        screen_width, screen_height = SCREEN_WIDTH, SCREEN_HEIGHT
 
         # Desenha o número da Geração/Nível atual e tempo
         if self.game_state == "PLAYING":
             arcade.draw_text(
                 f"Geração: {self.level} | Tempo: {self.level_time:.1f}s",
-                SCREEN_WIDTH - 250,
-                SCREEN_HEIGHT - 20,
+                screen_width - 250,
+                screen_height - 20,
                 arcade.color.DARK_BLUE,
                 16,
                 anchor_x="left",
@@ -987,15 +937,14 @@ class MyGame(arcade.Window):
             arcade.draw_text(
                 "Pressione 'G' para esconder/mostrar logs. Pressione '0' para EVOLUIR.",
                 10,
-                SCREEN_HEIGHT - 20,
+                screen_height - 20,
                 arcade.color.GRAY,
                 12,
             )
 
-            y_offset = SCREEN_HEIGHT - 45
+            y_offset = screen_height - 45
 
             for i, enemy in enumerate(self.enemy_list):
-                # Rastreamento de fitness em tempo real (simplificado)
                 temp_fitness = (W_HITS * enemy.hits) + (
                     W_PROXIMITY * enemy.proximity_score
                 )
