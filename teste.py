@@ -21,7 +21,7 @@ SCREEN_TITLE = "Plataforma com Evolução de Inimigos"
 CAMERA_ZOOM = 3.0
 
 # Nome do arquivo de mapa Tiled
-MAP_NAME = "assets/test_level.tmx"
+MAP_NAME = "assets/level-1.tmx"
 
 # Constantes do Jogo
 PLAYER_SCALE = 0.6  # Escala do jogador
