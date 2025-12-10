@@ -84,6 +84,20 @@ TRAIT_MULTIPLIER = 0.5
 # Configurações de Câmera e Cor
 BACKGROUND_COLOR = (173, 216, 230)
 
+# --- MAPA DE SPRITES NATIVOS DO ARCADE ---
+ENEMY_SPRITES_MAP = {
+    "flying": ":resources:images/enemies/bee.png",
+    "running": ":resources:images/enemies/frog.png",
+    "swimming": ":resources:images/enemies/fishPink.png",
+}
+
+# NOVO CAMINHO DO SPRITE DO PLAYER
+PLAYER_IDLE_SPRITE = (
+    ":resources:images/animated_characters/female_person/femalePerson_idle.png"
+)
+
+# --- FIM DO MAPA DE SPRITES ---
+
 
 class Enemy(arcade.Sprite):
     """
@@ -92,26 +106,35 @@ class Enemy(arcade.Sprite):
     """
 
     # Altera a escala padrão para a constante ENEMY_SCALE
-    def __init__(self, traits: dict, image_path: str, scale: float = ENEMY_SCALE):
+    def __init__(self, traits: dict, scale: float = ENEMY_SCALE):
 
-        # Cria um placeholder visual
-        if image_path.startswith(":resources:") or image_path == "circle_placeholder":
-            # O cálculo do raio deve ser ajustado para a nova escala do inimigo
+        enemy_type = traits.get("type")
+
+        # 1. Escolhe o caminho da imagem com base no tipo de inimigo (usando o novo mapa)
+        selected_image_path = ENEMY_SPRITES_MAP.get(enemy_type)
+
+        # 2. Se o caminho for encontrado, carrega o sprite real
+        if selected_image_path:
+            super().__init__(selected_image_path, scale)
+            self.color = (
+                arcade.color.WHITE
+            )  # Define a cor como branca para não interferir no sprite
+
+        # 3. Fallback (se por algum motivo o tipo não estiver no mapa, usa o círculo placeholder original)
+        else:
+            print(
+                f"AVISO: Tipo de inimigo '{enemy_type}' desconhecido. Usando placeholder."
+            )
             radius = int(20 * (scale / 0.4))
             super().__init__(None, scale)
             self.texture = arcade.make_circle_texture(radius * 2, arcade.color.RED)
             self.width = radius * 2
             self.height = radius * 2
 
-            # Ajusta a cor com base no traço 'run' para visualização
+            # Ajusta a cor do placeholder com base no traço 'run' para visualização
             run_norm = traits.get("run", 1) / MAX_TRAIT_VALUE
-
-            # Cor para o inimigo (AGORA VERMELHO COMO OS OUTROS)
             color_intensity = int(255 * (1 - run_norm * 0.5))
             self.color = (255, color_intensity, color_intensity)
-        else:
-            super().__init__(image_path, scale)
-            self.color = (255, 100, 100)
 
         self.traits = traits
 
@@ -206,7 +229,7 @@ class Enemy(arcade.Sprite):
                 continue
 
             # --- VERIFICAÇÃO DE NÍVEL DE COLISÃO ---
-            # Se a colisão for com um tile NÃO-ÁGUA, verifica se este tile está
+            # Se colidir com um tile NÃO-ÁGUA, verifica se este tile está
             # no nível horizontal do inimigo (ou ligeiramente acima/abaixo)
             # para ignorar plataformas muito altas.
             # Usaremos o centro do tile para checagem vertical.
@@ -417,7 +440,7 @@ class MyGame(arcade.Window):
     """
 
     def __init__(self, width=SCREEN_WIDTH, height=SCREEN_HEIGHT, title=SCREEN_TITLE):
-        # Usamos as dimensões fixas da tela para simplificar a câmera
+        # Usamos as dimensões fixas da tela para o GUI
         super().__init__(width, height, title)
 
         self.player_list = None
@@ -533,9 +556,10 @@ class MyGame(arcade.Window):
 
         # Configuração do Player
         self.player_sprite = arcade.Sprite(
-            ":resources:images/animated_characters/female_person/femalePerson_idle.png",
+            PLAYER_IDLE_SPRITE,  # USANDO O NOVO SPRITE DO PLAYER
             PLAYER_SCALE,
         )
+
         self.player_sprite.width = self.tile_size * 0.8 * (PLAYER_SCALE / 0.4)
         self.player_sprite.height = self.tile_size * 0.8 * (PLAYER_SCALE / 0.4)
 
@@ -605,7 +629,9 @@ class MyGame(arcade.Window):
         random.shuffle(available_water_spawns)
 
         for i, traits in enumerate(traits_list):
-            enemy = Enemy(traits, "circle_placeholder", ENEMY_SCALE)
+            # Não é mais necessário passar o image_path, pois Enemy decide
+            # o sprite baseado no tipo de traço.
+            enemy = Enemy(traits, scale=ENEMY_SCALE)
             enemy.set_target(self.player_sprite)
             enemy_type = traits.get("type")
 
@@ -1179,7 +1205,13 @@ class MyGame(arcade.Window):
                 temp_fitness = (W_HITS * enemy.hits) + (
                     W_PROXIMITY * enemy.proximity_score
                 )
-                text = f"E{i+1} ({enemy.traits['type'][0]}): F:{temp_fitness:.1f} | R:{enemy.traits['run']:.2f} | J:{enemy.traits['jump']:.2f} | Fl:{enemy.traits['fly']:.2f} | AC:{enemy.attack_cooldown:.1f}"
+
+                # Adiciona o cooldown do ataque do nadador ao log
+                attack_cooldown_log = ""
+                if enemy.traits["type"] == "swimming":
+                    attack_cooldown_log = f" | AC:{enemy.attack_cooldown:.1f}"
+
+                text = f"E{i+1} ({enemy.traits['type'][0]}): F:{temp_fitness:.1f} | R:{enemy.traits['run']:.2f} | J:{enemy.traits['jump']:.2f} | Fl:{enemy.traits['fly']:.2f}{attack_cooldown_log}"
                 arcade.draw_text(
                     text,
                     10,
