@@ -1052,7 +1052,7 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
 
-        START_Y -= LINE_HEIGHT * 1.5
+        START_Y -= LINE_HEIGHT * 2.5
 
         # Linhas de Dados
         for i, enemy_data in enumerate(self.summary_data["enemies"]):
@@ -1181,7 +1181,7 @@ class MyGame(arcade.Window):
         if self.game_state == "PLAYING":
             arcade.draw_text(
                 f"Geração: {self.level} | Tempo: {self.level_time:.1f}s",
-                screen_width - 250,
+                screen_width - 275,
                 screen_height - 20,
                 arcade.color.DARK_BLUE,
                 16,
