@@ -10,6 +10,8 @@ Os novos traços são gerados através de Cruzamento (Crossover) e Mutação.
 import arcade
 import random
 import math
+import xml.etree.ElementTree as ET
+import os
 
 # --- Configurações do Jogo ---
 # Restaurando as dimensões fixas da tela para simplificar a câmera
@@ -17,8 +19,14 @@ SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
 SCREEN_TITLE = "Plataforma com Evolução de Inimigos"
 
+PARALLAX_LAYERS = {
+    "bg 0": 0.0,  # Fundo mais distante (quase não se move)
+    "bg 1": 0.2,  # Fundo médio (move-se um pouco)
+    "bg 2": 0.5,  # Fundo mais próximo (move-se bastante)
+}
+
 # Zoom da câmera: 2.0 significa que você verá metade do que via antes, ou seja, a câmera está 2x mais perto
-CAMERA_ZOOM = 3.0
+CAMERA_ZOOM = 2.0
 
 # Nome do arquivo de mapa Tiled
 MAP_NAME = "assets/level-1.tmx"
@@ -82,7 +90,7 @@ BAT_PROXIMITY_HORIZONTAL_DRAG = 0.7
 TRAIT_MULTIPLIER = 0.5
 
 # Configurações de Câmera e Cor
-BACKGROUND_COLOR = (173, 216, 230)
+BACKGROUND_COLOR = (46, 90, 137)
 
 # --- MAPA DE SPRITES NATIVOS DO ARCADE ---
 ENEMY_SPRITES_MAP = {
@@ -90,6 +98,78 @@ ENEMY_SPRITES_MAP = {
     "running": ":resources:images/enemies/frog.png",
     "swimming": ":resources:images/enemies/fishPink.png",
 }
+
+# --- FIM DO MAPA DE SPRITES ---
+
+
+class BackgroundImage(arcade.Sprite):
+    """Sprite simples para imagens de fundo estáticas."""
+
+    def __init__(self, image_path, x, y):
+        try:
+            super().__init__(image_path, scale=1.0)
+            self.center_x = x
+            self.center_y = y
+        except Exception as e:
+            print(f"Erro ao carregar imagem {image_path}: {e}")
+
+
+def load_background_images(tmx_path, map_width):
+    """
+    Carrega as imagens de fundo do arquivo .tmx e as repete horizontalmente.
+
+    Args:
+        tmx_path: Caminho do arquivo .tmx
+        map_width: Largura total do mapa em pixels
+
+    Retorna:
+        Uma SpriteList com as imagens de fundo repetidas.
+    """
+    backgrounds = arcade.SpriteList()
+
+    try:
+        tree = ET.parse(tmx_path)
+        root = tree.getroot()
+        tmx_dir = os.path.dirname(tmx_path)
+
+        for imagelayer in root.findall("imagelayer"):
+            layer_name = imagelayer.get("name", "unknown")
+            offsetx = int(imagelayer.get("offsetx", 0))
+            offsety = int(imagelayer.get("offsety", 0))
+
+            image_tag = imagelayer.find("image")
+            if image_tag is not None:
+                image_source = image_tag.get("source", "")
+                image_width = int(image_tag.get("width", 0))
+                image_height = int(image_tag.get("height", 0))
+                image_path = os.path.join(tmx_dir, image_source)
+
+                # Para cobrir corretamente mesmo que offsetx seja negativo,
+                # começamos um pouco à esquerda do offset, garantindo cobertura
+                # desde além da borda esquerda até além da largura do mapa.
+                start_x = offsetx
+                # Move start_x para a esquerda até ficar <= -image_width
+                while start_x > -image_width:
+                    start_x -= image_width
+
+                end_x = map_width + image_width
+
+                x = start_x
+                while x < end_x:
+                    center_x = x + image_width / 2
+                    center_y = offsety + image_height / 2
+
+                    bg_sprite = BackgroundImage(image_path, center_x, center_y)
+                    backgrounds.append(bg_sprite)
+
+                    x += image_width
+
+                print(f"✓ Fundo repetido considerando offset: {layer_name}")
+    except Exception as e:
+        print(f"Erro ao carregar imagens de fundo: {e}")
+
+    return backgrounds
+
 
 # NOVO CAMINHO DO SPRITE DO PLAYER
 PLAYER_IDLE_SPRITE = (
@@ -451,6 +531,8 @@ class MyGame(arcade.Window):
         self.ground_list = None
         self.foreground_list = None
         self.player_sprite = None
+        self.background_layers = {}
+        self.background_images = []  # Lista para armazenar as imagens de fundo
 
         # Dimensões do mapa em pixels (calculadas no setup)
         self.map_width_pixels = 0
@@ -461,8 +543,10 @@ class MyGame(arcade.Window):
         self.water_tile_centers = []
 
         # Inicializa câmeras
-        self.camera = arcade.camera.Camera2D()
-        self.gui_camera = arcade.camera.Camera2D()
+        screen_limits = (width, height)
+        screen_rect = arcade.LRBT(0, width, 0, height)
+        self.camera = arcade.camera.Camera2D(viewport=screen_rect)
+        self.gui_camera = arcade.camera.Camera2D(viewport=screen_rect)
 
         # --- APLICA O ZOOM NO MUNDO DO JOGO ---
         self.camera.zoom = CAMERA_ZOOM
@@ -517,10 +601,13 @@ class MyGame(arcade.Window):
             MAP_NAME, scaling=1.0, layer_options=layer_options
         )
 
-        # 2. Calcula as dimensões do mapa em pixels
+        # Calcula as dimensões do mapa em pixels ANTES de carregar os fundos
         self.map_width_pixels = self.tile_map.width * self.tile_map.tile_width
         self.map_height_pixels = self.tile_map.height * self.tile_map.tile_height
         self.tile_size = self.tile_map.tile_width
+
+        # Carrega as imagens de fundo do arquivo .tmx
+        self.background_images = load_background_images(MAP_NAME, self.map_width_pixels)
 
         # Configuração das listas e camadas
         self.player_list = arcade.SpriteList()
@@ -873,8 +960,6 @@ class MyGame(arcade.Window):
         screen_center_x = max(0, screen_center_x)
         screen_center_y = max(0, screen_center_y)
 
-        camera_center_position = (screen_center_x, screen_center_y)
-
         # Move a câmera instantaneamente para a nova posição (requerido pelo usuário)
         # O argumento instant=True não é usado aqui, mas manteremos o parâmetro
         # para referência futura se quisermos movimento suave.
@@ -1161,6 +1246,9 @@ class MyGame(arcade.Window):
 
         # 1. Desenhar o MUNDO DO JOGO (mapa, player, inimigos) usando a CAMERA
         self.camera.use()
+
+        # Desenha as imagens de fundo estáticas
+        self.background_images.draw()
 
         if self.ground_list:
             self.ground_list.draw()
