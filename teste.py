@@ -54,6 +54,19 @@ W_PROXIMITY = 1.0
 # Limite de distância para considerar um "Hit"
 HIT_SCORE_THRESHOLD = 20
 
+# --- CONSTANTES DE NADO (SWIMMER) ---
+SWIM_TILE_ID = 59  # ID do tile de água no Tiled Map (AJUSTADO PARA 59)
+SWIM_BASE_SPEED = 1.0  # Velocidade de perseguição lenta na água
+SWIMMER_ATTACK_RANGE = 100  # Raio para ativar o pulo de ataque
+SWIMMER_JUMP_FORCE = 15.0  # Força do pulo de ataque
+SWIMMER_ATTACK_COOLDOWN = (
+    2.0  # Tempo de recarga do ataque (para não pular infinitamente)
+)
+SWIM_VERTICAL_BOOST = (
+    0.5  # Para simular um movimento vertical lento (APENAS PARA AJUSTE)
+)
+
+
 # Constantes de Voo (Não Alteradas)
 BAT_FLAP_LIFT = 8.0
 BAT_GRAVITY_EFFECT = -0.3
@@ -92,6 +105,8 @@ class Enemy(arcade.Sprite):
 
             # Ajusta a cor com base no traço 'run' para visualização
             run_norm = traits.get("run", 1) / MAX_TRAIT_VALUE
+
+            # Cor para o inimigo (AGORA VERMELHO COMO OS OUTROS)
             color_intensity = int(255 * (1 - run_norm * 0.5))
             self.color = (255, color_intensity, color_intensity)
         else:
@@ -108,10 +123,16 @@ class Enemy(arcade.Sprite):
         self.flap_timer = random.uniform(0, BAT_FLAP_BASE_INTERVAL)
 
         self.physics_engine = None
+        self.ground_list = None  # Armazena a lista de colisões
+        self.swim_tile_id = -1  # Armazena o ID do tile de nado
+
         self.jump_cooldown = 0.0
         self.JUMP_COOLDOWN_TIME = 1.0
         self.is_drifting = False
         self.player_target = None
+
+        # Variável específica para o ataque de nado
+        self.attack_cooldown = 0.0
 
         # Variáveis de Rastreamento de Fitness
         self.hits = 0
@@ -128,33 +149,186 @@ class Enemy(arcade.Sprite):
     def set_target(self, player_sprite):
         self.player_target = player_sprite
 
-    def set_physics_engine(self, engine):
+    def set_physics_engine(self, engine, ground_list=None, swim_tile_id=None):
+        """Define o motor de física e, se aplicável, informações de colisão/nado."""
         self.physics_engine = engine
+        self.ground_list = ground_list
+        if swim_tile_id is not None:
+            self.swim_tile_id = swim_tile_id
+
+    def is_on_swim_tile(self):
+        """Verifica se o inimigo está sobre um tile de nado (ID 59)."""
+        if not self.ground_list or self.swim_tile_id == -1:
+            return False
+
+        # Verifica colisão com qualquer tile do ground_list
+        hit_list = arcade.check_for_collision_with_list(self, self.ground_list)
+
+        for sprite in hit_list:
+            tile_id = sprite.properties.get("tile_id")
+            if tile_id == self.swim_tile_id:
+                return True
+        return False
+
+    def is_swimming_collision(self, dx: float, dy: float) -> bool:
+        """
+        Verifica se o movimento proposto (dx, dy) colide com um tile
+        que NÃO é o tile de nado (ID 59) E SE A COLISÃO ESTÁ NO NÍVEL DA ÁGUA.
+        Se a colisão for muito acima do inimigo, ela é ignorada para permitir
+        que ele nade por baixo de plataformas.
+        Retorna True se houver colisão com um tile "não-navegável" no nível da água.
+        """
+        if not self.ground_list or self.swim_tile_id == -1:
+            return False
+
+        # 1. Pré-verificação de posição
+        original_x = self.center_x
+        original_y = self.center_y
+        self.center_x += dx
+        self.center_y += dy
+
+        # 2. Verifica colisões com TODOS os tiles no ground_list
+        hit_list = arcade.check_for_collision_with_list(self, self.ground_list)
+
+        # 3. Retorna o sprite para a posição original
+        self.center_x = original_x
+        self.center_y = original_y
+
+        # 4. Analisa as colisões
+        if not hit_list:
+            return False
+
+        for sprite in hit_list:
+            tile_id = sprite.properties.get("tile_id")
+
+            # Se colidir com o tile de água, não bloqueia.
+            if tile_id == self.swim_tile_id:
+                continue
+
+            # --- VERIFICAÇÃO DE NÍVEL DE COLISÃO ---
+            # Se a colisão for com um tile NÃO-ÁGUA, verifica se este tile está
+            # no nível horizontal do inimigo (ou ligeiramente acima/abaixo)
+            # para ignorar plataformas muito altas.
+            # Usaremos o centro do tile para checagem vertical.
+
+            # Se a colisão ocorrer no eixo Y do inimigo, bloqueia.
+            # Um limite de tolerância é usado (ex: 1.5x a altura do inimigo)
+            vertical_tolerance = self.height * 1.5
+
+            is_blocking_vertically = (
+                abs(sprite.center_y - self.center_y) < vertical_tolerance
+            )
+
+            if is_blocking_vertically:
+                # Colisão com um tile sólido no nível da água (parede/fundo)
+                return True
+
+        # Todas as colisões foram com tiles de água ou tiles sólidos muito altos (ignorados)
+        return False
 
     def update_movement(self, delta_time):
-        """Lógica de movimento do inimigo. Detalhes omitidos por serem os mesmos da versão anterior."""
+        """Lógica de movimento do inimigo."""
         if not self.player_target:
             return
 
         if self.jump_cooldown > 0:
             self.jump_cooldown -= delta_time
 
-        # 1. Movimento Terrestre (run/jump)
-        if self.traits.get("run", 0) > 0 and self.traits.get("type") != "flying":
-            distance_to_player = self.player_target.center_x - self.center_x
+        # Atualiza o cooldown de ataque do nadador
+        if self.attack_cooldown > 0:
+            self.attack_cooldown -= delta_time
 
-            if abs(distance_to_player) > ENEMY_PERCEPTION_RANGE:
+        is_runner = self.traits.get("type") == "running"
+        is_swimmer = self.traits.get("type") == "swimming"
+        is_flying = self.traits.get("type") == "flying"
+
+        # 1. Movimento Terrestre (run/jump) OU Nado
+        if self.traits.get("run", 0) > 0 and (is_runner or is_swimmer):
+
+            # Cálculo de distância
+            dx = self.player_target.center_x - self.center_x
+            dy = self.player_target.center_y - self.center_y
+            distance = math.sqrt(dx**2 + dy**2)
+
+            if abs(dx) > ENEMY_PERCEPTION_RANGE:
                 self.change_x *= ENEMY_FRICTION
                 self.is_drifting = False
                 return
 
             desired_direction = 0
-            if distance_to_player < 0:
+            if dx < 0:
                 desired_direction = -1
-            elif distance_to_player > 0:
+            elif dx > 0:
                 desired_direction = 1
 
-            if desired_direction != 0:
+            # --- Lógica de Nado (Swimmer) ---
+            if is_swimmer:
+                on_swim_tile = self.is_on_swim_tile()
+
+                # Se o nadador não está na água, ele simplesmente para.
+                if not on_swim_tile:
+                    self.change_x = 0
+                    self.change_y = 0
+                    # Tenta se mover para baixo para encontrar a água se estiver no ar (pequeno ajuste)
+                    self.center_y -= 0.5
+                    return
+
+                # Inimigo está na água:
+
+                # --- SWIMMER_ATTACK_LOGIC: ATAQUE DE SALTO ---
+                if distance < SWIMMER_ATTACK_RANGE and self.attack_cooldown <= 0:
+
+                    # 1. Zera a velocidade horizontal para carregar o pulo
+                    self.change_x = 0
+
+                    # 2. Aplica o pulo (ataque)
+                    # A força do pulo pode ser multiplicada pelo traço 'jump' do inimigo
+                    jump_trait_factor = self.traits.get("jump", 1.0) / MAX_TRAIT_VALUE
+                    jump_force = SWIMMER_JUMP_FORCE * jump_trait_factor
+
+                    self.change_y = jump_force
+
+                    # 3. Aplica cooldown
+                    self.attack_cooldown = SWIMMER_ATTACK_COOLDOWN
+
+                    # Adiciona um pequeno impulso horizontal na direção do player
+                    self.change_x = desired_direction * 2
+
+                    return  # Não faz mais nada, está no meio do pulo
+
+                # --- SWIMMER_ATTACK_LOGIC: PERSEGUIÇÃO LENTA (Padrão) ---
+
+                # 1. Movimento Horizontal Lento (Perseguição)
+
+                # Multiplica a velocidade base pelo traço 'run' para evoluir a velocidade de perseguição
+                current_swim_speed = SWIM_BASE_SPEED * (
+                    self.traits.get("run", 1.0) / MAX_TRAIT_VALUE
+                )
+
+                self.change_x = desired_direction * current_swim_speed
+
+                # Verifica colisão horizontal
+                if self.is_swimming_collision(self.change_x, 0):
+                    self.change_x = 0
+
+                # 2. Movimento Vertical (Ajuste lento para manter na altura do player)
+                # Mantém o centro do inimigo na vertical do player (ou apenas flutuando)
+                if abs(dy) > self.height * 0.1:  # Margem para evitar oscilação
+                    self.change_y = math.copysign(SWIM_VERTICAL_BOOST, dy)
+                else:
+                    self.change_y = 0
+
+                # Verifica colisão vertical (com o fundo/topo)
+                if self.is_swimming_collision(0, self.change_y):
+                    self.change_y = 0
+
+                # Nadadores não usam motor de plataforma.
+                return
+
+            # --- Lógica de Corrida e Salto (Apenas para "running") ---
+            if is_runner:
+
+                # Lógica de aceleração, fricção, e desvio (Drift)
                 if (desired_direction * self.change_x < 0) and (
                     abs(self.change_x) > 0.5
                 ):
@@ -162,21 +336,21 @@ class Enemy(arcade.Sprite):
                 else:
                     self.is_drifting = False
 
-            if self.is_drifting:
-                self.change_x *= ENEMY_DRIFT_DECELERATION
-                if abs(self.change_x) < 0.2:
-                    self.is_drifting = False
-                    self.change_x = 0
-            elif desired_direction != 0:
-                self.change_x += ENEMY_ACCELERATION * desired_direction
-            else:
-                self.change_x *= ENEMY_FRICTION
+                if self.is_drifting:
+                    self.change_x *= ENEMY_DRIFT_DECELERATION
+                    if abs(self.change_x) < 0.2:
+                        self.is_drifting = False
+                        self.change_x = 0
+                elif desired_direction != 0:
+                    self.change_x += ENEMY_ACCELERATION * desired_direction
+                else:
+                    self.change_x *= ENEMY_FRICTION
 
-            self.change_x = max(
-                min(self.change_x, self.max_run_speed), -self.max_run_speed
-            )
+                self.change_x = max(
+                    min(self.change_x, self.max_run_speed), -self.max_run_speed
+                )
 
-            if self.traits.get("type") == "running":
+                # Lógica de Salto
                 jump_trait = self.traits.get("jump", 0)
                 if jump_trait > 0 and self.physics_engine and self.jump_cooldown <= 0:
                     player_higher = (
@@ -195,14 +369,16 @@ class Enemy(arcade.Sprite):
                         self.jump_cooldown = self.JUMP_COOLDOWN_TIME
 
         # 2. Movimento Vertical (fly)
-        if self.traits.get("fly", 0) > 0 and self.traits.get("type") == "flying":
+        if is_flying and self.traits.get("fly", 0) > 0:
             self.change_y += BAT_GRAVITY_EFFECT
 
+            dx = self.player_target.center_x - self.center_x
             dy = self.player_target.center_y - self.center_y
-            dx = abs(self.player_target.center_x - self.center_x)
+
+            abs_dx = abs(dx)
 
             vertical_dead_zone = BAT_HEIGHT_DEAD_ZONE
-            if dx < BAT_PROXIMITY_RANGE:
+            if abs_dx < BAT_PROXIMITY_RANGE:
                 vertical_dead_zone += BAT_PROXIMITY_DEAD_ZONE_BONUS
                 self.change_x *= BAT_PROXIMITY_HORIZONTAL_DRAG
 
@@ -218,9 +394,9 @@ class Enemy(arcade.Sprite):
                 self.change_y = BAT_FLAP_LIFT
 
             target_direction = 0
-            if self.player_target.center_x < self.center_x:
+            if dx < 0:
                 target_direction = -1
-            elif self.player_target.center_x > self.center_x:
+            elif dx > 0:
                 target_direction = 1
 
             wobble = random.uniform(-HORIZONTAL_WOBBLE, HORIZONTAL_WOBBLE)
@@ -241,7 +417,7 @@ class MyGame(arcade.Window):
     """
 
     def __init__(self, width=SCREEN_WIDTH, height=SCREEN_HEIGHT, title=SCREEN_TITLE):
-        # Usamos as constantes fixas da tela
+        # Usamos as dimensões fixas da tela para simplificar a câmera
         super().__init__(width, height, title)
 
         self.player_list = None
@@ -257,6 +433,9 @@ class MyGame(arcade.Window):
         self.map_width_pixels = 0
         self.map_height_pixels = 0
         self.tile_size = 16
+
+        # Armazena a lista de posições dos tiles de água para o spawn
+        self.water_tile_centers = []
 
         # Inicializa câmeras
         self.camera = arcade.camera.Camera2D()
@@ -279,10 +458,11 @@ class MyGame(arcade.Window):
         self.level_time = 0.0
         self.summary_data = None
 
-        # Traços iniciais para a próxima geração
+        # Traços iniciais para a próxima geração (AGORA INCLUINDO O NADADOR)
         self.next_generation_traits = [
             {"run": 5.0, "fly": 1.0, "jump": 5.0, "type": "running"},
             {"run": 1.0, "fly": 5.0, "jump": 1.0, "type": "flying"},
+            {"run": 3.0, "fly": 1.0, "jump": 1.0, "type": "swimming"},
         ]
 
     def on_resize(self, width: float, height: float):
@@ -291,10 +471,6 @@ class MyGame(arcade.Window):
         Ajusta as câmeras para o novo tamanho e reafirma o zoom.
         """
         super().on_resize(width, height)
-        # Redimensiona as câmeras para o novo viewport
-        # self.camera.resize(width, height)
-        # self.gui_camera.resize(width, height)
-
         # Reaplicamos o zoom após redimensionar para manter a proximidade
         self.camera.zoom = CAMERA_ZOOM
 
@@ -328,6 +504,7 @@ class MyGame(arcade.Window):
         self.enemy_list = arcade.SpriteList()
         self.enemy_physics_engines = []
         self.hit_cooldown = 0.0
+        self.water_tile_centers = []  # Limpa tiles de água
 
         self.ground_list = self.tile_map.sprite_lists.get(COLLISION_LAYER_NAME)
         self.foreground_list = self.tile_map.sprite_lists.get(
@@ -339,6 +516,20 @@ class MyGame(arcade.Window):
                 f"ATENÇÃO: A camada '{COLLISION_LAYER_NAME}' não foi encontrada. Usando SpriteList vazia."
             )
             self.ground_list = arcade.SpriteList()
+
+        # --- LÓGICA CORRIGIDA: PRÉ-CALCULAR PONTOS DE SPAWN DE ÁGUA ---
+        for sprite in self.ground_list:
+            tile_id = sprite.properties.get("tile_id")
+            # Usa o ID corrigido (SWIM_TILE_ID = 59)
+            if tile_id == SWIM_TILE_ID:
+                # Armazena o centro do tile de água
+                self.water_tile_centers.append((sprite.center_x, sprite.center_y))
+
+        if not self.water_tile_centers:
+            print(
+                f"AVISO: Nenhuma tile de água (ID:{SWIM_TILE_ID}) encontrada na camada '{COLLISION_LAYER_NAME}' para spawn de nadadores!"
+            )
+        # --- FIM DA LÓGICA DE PRÉ-CÁLCULO ---
 
         # Configuração do Player
         self.player_sprite = arcade.Sprite(
@@ -405,27 +596,63 @@ class MyGame(arcade.Window):
         self.player_sprite.change_x = 0
         self.player_sprite.change_y = 0
 
+        # Offsets de spawn para corredores e voadores
+        spawn_x_offsets = [100, 250, 400]
+        spawn_y_offsets = [0, 50, 100]
+
+        # Lista de tiles de água disponíveis para spawn
+        available_water_spawns = list(self.water_tile_centers)
+        random.shuffle(available_water_spawns)
+
         for i, traits in enumerate(traits_list):
             enemy = Enemy(traits, "circle_placeholder", ENEMY_SCALE)
             enemy.set_target(self.player_sprite)
+            enemy_type = traits.get("type")
 
-            spawn_x_offsets = [100, 250, 400]
-            spawn_y_offsets = [0, 50, 100]
+            if enemy_type == "swimming":
+                # --- LÓGICA DE SPAWN PARA NADADORES ---
+                if available_water_spawns:
+                    # Usa o próximo ponto de água disponível
+                    water_x, water_y = available_water_spawns.pop(0)
+                    enemy.center_x = water_x
 
-            offset_index = i % len(spawn_x_offsets)
-            y_offset = spawn_y_offsets[i % len(spawn_y_offsets)] + self.tile_size * 0.5
+                    # AJUSTE CRÍTICO: Move o inimigo ligeiramente para baixo
+                    # para que ele pareça submerso e não flutuando no ar.
+                    enemy.center_y = water_y - (self.tile_size * 0.25)
 
-            enemy.center_x = spawn_point_x + spawn_x_offsets[offset_index]
-            enemy.center_y = spawn_point_y + y_offset
+                else:
+                    # Fallback se não houver mais tiles de água disponíveis
+                    enemy.center_x = (
+                        spawn_point_x + spawn_x_offsets[i % len(spawn_x_offsets)]
+                    )
+                    enemy.center_y = spawn_point_y + self.tile_size * 0.5
+                    print(
+                        "Aviso: Nadador nasceu em posição padrão devido à falta de tiles de água."
+                    )
+
+                enemy.set_physics_engine(
+                    None, self.ground_list, SWIM_TILE_ID
+                )  # Nadadores não usam Platformer
+
+            else:
+                # --- LÓGICA DE SPAWN PARA CORREDORES/VOADORES ---
+                offset_index = i % len(spawn_x_offsets)
+                y_offset = spawn_y_offsets[offset_index] + self.tile_size * 0.5
+
+                enemy.center_x = spawn_point_x + spawn_x_offsets[offset_index]
+                enemy.center_y = spawn_point_y + y_offset
+
+                if enemy_type == "running":
+                    runner_engine = arcade.PhysicsEnginePlatformer(
+                        enemy, gravity_constant=GRAVITY, walls=self.ground_list
+                    )
+                    self.enemy_physics_engines.append(runner_engine)
+                    enemy.set_physics_engine(runner_engine)
+
+                # Voador não precisa de motor de física, mas precisa do target
+                # e já tem a lógica de movimento em update_movement
 
             self.enemy_list.append(enemy)
-
-            if traits.get("type") != "flying":
-                runner_engine = arcade.PhysicsEnginePlatformer(
-                    enemy, gravity_constant=GRAVITY, walls=self.ground_list
-                )
-                self.enemy_physics_engines.append(runner_engine)
-                enemy.set_physics_engine(runner_engine)
 
         # Centraliza a câmera no jogador após o spawn
         self.center_camera_to_player(instant=True)
@@ -643,7 +870,12 @@ class MyGame(arcade.Window):
         for enemy in self.enemy_list:
             enemy.update_movement(delta_time)
 
-            if enemy.traits.get("type") == "flying":
+            # Aplica movimento para inimigos que não usam PhysicsEnginePlatformer
+            # Isso inclui o nadador e o voador
+            if (
+                enemy.traits.get("type") == "flying"
+                or enemy.traits.get("type") == "swimming"
+            ):
                 enemy.update()
 
             # RASTREAMENTO DE FITNESS
@@ -661,10 +893,9 @@ class MyGame(arcade.Window):
                 enemy.hits += 1
                 self.hit_cooldown = self.HIT_COOLDOWN_TIME
 
+        # Aplica movimento e física para inimigos que usam PhysicsEnginePlatformer (Runners)
         for engine in self.enemy_physics_engines:
             engine.update()
-
-        self.enemy_list.update()
 
         # A CÂMERA DEVE SEGUIR O JOGADOR A CADA FRAME
         self.center_camera_to_player()
@@ -948,7 +1179,7 @@ class MyGame(arcade.Window):
                 temp_fitness = (W_HITS * enemy.hits) + (
                     W_PROXIMITY * enemy.proximity_score
                 )
-                text = f"E{i+1} ({enemy.traits['type'][0]}): F:{temp_fitness:.1f} | R:{enemy.traits['run']:.2f} | J:{enemy.traits['jump']:.2f} | Fl:{enemy.traits['fly']:.2f}"
+                text = f"E{i+1} ({enemy.traits['type'][0]}): F:{temp_fitness:.1f} | R:{enemy.traits['run']:.2f} | J:{enemy.traits['jump']:.2f} | Fl:{enemy.traits['fly']:.2f} | AC:{enemy.attack_cooldown:.1f}"
                 arcade.draw_text(
                     text,
                     10,
