@@ -102,6 +102,42 @@ ENEMY_SPRITES_MAP = {
 # --- FIM DO MAPA DE SPRITES ---
 
 
+def determine_enemy_type(traits: dict) -> str:
+    """
+    Determina o tipo do inimigo baseado nos traços.
+
+    Lógica:
+    - Se um traço > 3.0, o inimigo ganha aquela habilidade
+    - Um inimigo nunca pode ter mais de uma habilidade ativa
+    - Se múltiplas habilidades > 3.0, escolhe uma aleatoriamente
+
+    Traits: run, fly, jump, swim
+    Types: running, flying, swimming
+    """
+    ABILITY_THRESHOLD = 3.0
+
+    active_abilities = []
+
+    # Verifica quais habilidades estão ativas (> 3.0)
+    if traits.get("run", 1.0) > ABILITY_THRESHOLD:
+        active_abilities.append("running")
+    if traits.get("fly", 1.0) > ABILITY_THRESHOLD:
+        active_abilities.append("flying")
+    if traits.get("swim", 1.0) > ABILITY_THRESHOLD:
+        active_abilities.append("swimming")
+
+    # Se nenhuma habilidade está ativa, retorna "running" como padrão
+    if not active_abilities:
+        return "running"
+
+    # Se múltiplas habilidades estão ativas, escolhe uma aleatoriamente
+    if len(active_abilities) > 1:
+        return random.choice(active_abilities)
+
+    # Se apenas uma habilidade está ativa, retorna ela
+    return active_abilities[0]
+
+
 class BackgroundImage(arcade.Sprite):
     """Sprite simples para imagens de fundo estáticas."""
 
@@ -551,6 +587,11 @@ class MyGame(arcade.Window):
         self.level_time = 0.0
         self.summary_data = None
 
+        # --- SISTEMA DE CHOQUE GENÉTICO ---
+        self.fitness_history = []  # Histórico de fitness máximo por geração
+        self.stagnation_threshold = 3  # Gerações sem melhora para disparar choque
+        self.genetic_shock_multiplier = 2.5  # Multiplicador de mutação no choque
+
         # Traços iniciais para a próxima geração (AGORA INCLUINDO O NADADOR)
         self.next_generation_traits = [
             {"run": 5.0, "fly": 1.0, "jump": 5.0, "swim": 1.0, "type": "running"},
@@ -773,25 +814,33 @@ class MyGame(arcade.Window):
         self, parent1_traits: dict, parent2_traits: dict, mutation_rate: float
     ) -> dict:
         """
-        Implementa o Crossover Simples (One-Point) e aplica Mutação.
+        Implementa o Uniform Crossover e aplica Mutação.
+        Uniform Crossover: para cada traço, 50% chance de vir de parent1, 50% de parent2.
+        Isso resulta em melhor mixing dos genes.
+        O tipo do inimigo é determinado automaticamente baseado nos traços.
         """
-        new_traits = {"type": parent1_traits["type"]}
+        new_traits = {}
         trait_keys = ["run", "fly", "jump", "swim"]
 
-        crossover_point = random.randint(1, len(trait_keys) - 1)
-
-        for i, key in enumerate(trait_keys):
-            if i < crossover_point:
+        # Uniform Crossover: para cada traço, escolhe aleatoriamente de qual parent vem
+        for key in trait_keys:
+            # 50% de chance de vir de parent1, 50% de parent2
+            if random.random() < 0.5:
                 base_value = parent1_traits.get(key, 1.0)
             else:
                 base_value = parent2_traits.get(key, 1.0)
 
+            # Aplica mutação
             mutation = random.uniform(-mutation_rate, mutation_rate)
             new_value = base_value + mutation
 
+            # Limita ao intervalo válido
             new_value = max(MIN_TRAIT_VALUE, min(MAX_TRAIT_VALUE, new_value))
 
             new_traits[key] = new_value
+
+        # Determina o tipo do inimigo baseado nos traços
+        new_traits["type"] = determine_enemy_type(new_traits)
 
         return new_traits
 
@@ -823,32 +872,54 @@ class MyGame(arcade.Window):
         elite_traits = elite_enemy.traits.copy()
         print(f"Elite: {elite_traits['type']} com Fitness: {max_fitness:.2f}")
 
-        # 2. Geração da Nova População (Seleção Elitista com Mutação Suave)
+        # --- SISTEMA DE CHOQUE GENÉTICO ---
+        # Detecta estagnação e aplica mutação mais agressiva
+        self.fitness_history.append(max_fitness)
+        is_stagnating = False
+        shock_mutation_rate = TRAIT_MUTATION_RATE
+
+        if len(self.fitness_history) >= self.stagnation_threshold + 1:
+            # Verifica se o fitness máximo não melhorou nas últimas N gerações
+            recent_fitness = self.fitness_history[-self.stagnation_threshold :]
+            if all(
+                f <= self.fitness_history[-self.stagnation_threshold - 1]
+                for f in recent_fitness
+            ):
+                is_stagnating = True
+                shock_mutation_rate = (
+                    TRAIT_MUTATION_RATE * self.genetic_shock_multiplier
+                )
+                print(f"CHOQUE GENÉTICO ATIVADO! Mutação: {shock_mutation_rate:.2f}")
+
+        # 2. Geração da Nova População (Seleção Elitista com Mutação Adaptativa)
         new_traits_list_ordered = []
         elite_mutation_rate = TRAIT_MUTATION_RATE * BEST_ENEMY_MUTATION_FACTOR
+        if is_stagnating:
+            elite_mutation_rate = shock_mutation_rate * BEST_ENEMY_MUTATION_FACTOR
 
         for i, old_enemy in enumerate(self.enemy_list):
 
             parent1_traits = elite_traits
             parent2_traits = old_enemy.traits.copy()
-            enemy_type = old_enemy.traits["type"]
 
             if old_enemy is elite_enemy:
-                # O Elite: Mutação Suave (taxa reduzida)
+                # O Elite: Mutação Suave (ou com choque se estagnando)
                 child_traits = self._crossover_and_mutate(
                     parent1_traits,
                     parent1_traits,
                     elite_mutation_rate,
                 )
             else:
-                # Os Filhos: Crossover com o Elite + Mutação Normal
+                # Os Filhos: Crossover com o Elite + Mutação Normal (ou com choque)
+                mutation_rate = (
+                    shock_mutation_rate if is_stagnating else TRAIT_MUTATION_RATE
+                )
                 child_traits = self._crossover_and_mutate(
                     parent1_traits,
                     parent2_traits,
-                    TRAIT_MUTATION_RATE,
+                    mutation_rate,
                 )
 
-            child_traits["type"] = enemy_type
             new_traits_list_ordered.append(child_traits)
 
         self.next_generation_traits = new_traits_list_ordered
@@ -861,6 +932,10 @@ class MyGame(arcade.Window):
         }
 
         for i, enemy in enumerate(self.enemy_list):
+            old_type = old_traits_list[i]["type"]
+            new_type = self.next_generation_traits[i]["type"]
+            type_changed = old_type != new_type
+
             self.summary_data["enemies"].append(
                 {
                     "id": i + 1,
@@ -871,6 +946,9 @@ class MyGame(arcade.Window):
                     "old_traits": old_traits_list[i],
                     "new_traits": self.next_generation_traits[i],
                     "is_elite": enemy is elite_enemy,
+                    "type_changed": type_changed,
+                    "old_type": old_type,
+                    "new_type": new_type,
                 }
             )
 
@@ -1067,15 +1145,32 @@ class MyGame(arcade.Window):
             anchor_x="center",
         )
 
+        # Indicador de Choque Genético
+        if len(self.fitness_history) >= self.stagnation_threshold + 1:
+            recent_fitness = self.fitness_history[-self.stagnation_threshold :]
+            if all(
+                f <= self.fitness_history[-self.stagnation_threshold - 1]
+                for f in recent_fitness
+            ):
+                arcade.draw_text(
+                    "CHOQUE GENÉTICO ATIVO",
+                    center_x,
+                    screen_height - 140,
+                    arcade.color.RED,
+                    16,
+                    anchor_x="center",
+                    bold=True,
+                )
+
         # ------------------- TABELA DE DADOS -------------------
 
         COL_X = {
             "ID": 80,
-            "TIPO": 180,
-            "FITNESS": 300,
-            "HITS": 380,
-            "PROXIMIDADE": 480,
-            "TRAITS_START": 570,
+            "TIPO": 200,
+            "FITNESS": 320,
+            "HITS": 420,
+            "PROXIMIDADE": 520,
+            "TRAITS_START": 610,
         }
 
         START_Y = screen_height - 170
@@ -1161,14 +1256,24 @@ class MyGame(arcade.Window):
             arcade.draw_text(
                 f"{enemy_data['id']}", COL_X["ID"], y, data_color, 14, anchor_x="center"
             )
+
+            # Tipo: mostra evolução se houver mudança
+            if enemy_data["type_changed"]:
+                type_text = f"{enemy_data['old_type'].capitalize()} -> {enemy_data['new_type'].capitalize()}"
+                type_color = arcade.color.LIGHT_GREEN
+            else:
+                type_text = enemy_data["type"].capitalize()
+                type_color = data_color
+
             arcade.draw_text(
-                enemy_data["type"].capitalize(),
+                type_text,
                 COL_X["TIPO"],
                 y,
-                data_color,
+                type_color,
                 14,
                 anchor_x="center",
             )
+
             arcade.draw_text(
                 f"{enemy_data['fitness']:.1f}",
                 COL_X["FITNESS"],
